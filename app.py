@@ -51,9 +51,9 @@ if st.button("Run Risk Assessment"):
             st.write("माफ गर्नुहोला, तपाईंको आवेदन अहिलेको लागि अस्वीकृत भएको छ।")
 
     # --- SHAP EXPLANATION PANEL (Figure D3 in your paper) ---
-    st.header("Explainability (XAI) Drivers")
-    st.write("The following factors influenced this decision:")
+        st.header("Explainability (XAI) Drivers")
+        st.write("The following factors influenced this decision:")
     
     # Simple visual representation of SHAP
-    factors = {"Income": 0.4, "Remittance": 0.3, "Age": 0.1, "Land Area": 0.2}
-    st.bar_chart(pd.DataFrame(factors, index=["Impact"]))
+        factors = {"Income": 0.4, "Remittance": 0.3, "Age": 0.1, "Land Area": 0.2}
+        st.bar_chart(pd.DataFrame(factors, index=["Impact"]))
