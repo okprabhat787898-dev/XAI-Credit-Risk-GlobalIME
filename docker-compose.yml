@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  xai-ras:
+    build: .
+    container_name: xai_ras_dashboard
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./models/artifacts:/app/models/artifacts
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
