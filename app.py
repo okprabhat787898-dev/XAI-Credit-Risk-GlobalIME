@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
+from dataclasses import dataclass
 from datetime import datetime
 
 APP_VERSION = "1.4.0"
-DEFAULT_MODEL_ID = "XAI-RAS-ENSEMBLE-v1"
+DEFAULT_MODEL_ID = "XAI-RAS-MOCK-RULES-v1"
 FEATURE_COLUMNS = ["Age", "Monthly Income", "Remittance", "Agricultural Land Area"]
 FEATURE_NAME_MAP = {
     "Monthly Income": "Income",
@@ -13,6 +13,15 @@ FEATURE_NAME_MAP = {
     "Agricultural Land Area": "Land",
     "Age": "Age",
 }
+RISK_WEIGHTS = {
+    "Income": 0.45,
+    "Remittance": 0.20,
+    "Land": 0.20,
+    "Age": 0.15,
+}
+INCOME_REFERENCE = 70000.0
+LAND_REFERENCE = 2.5
+AGE_REFERENCE = 35.0
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="XAI-RAS: Global IME Bank", layout="wide")
@@ -141,33 +150,48 @@ def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(value, maximum))
 
 
+def _income_risk(income: int) -> float:
+    return _clamp((INCOME_REFERENCE - float(income)) / INCOME_REFERENCE)
+
+
+def _remittance_risk(remittance: str) -> float:
+    return 0.0 if remittance == "Yes" else 1.0
+
+
+def _land_risk(land_area: float) -> float:
+    return _clamp((LAND_REFERENCE - float(land_area)) / LAND_REFERENCE)
+
+
+def _age_risk(age: int) -> float:
+    return _clamp(abs(float(age) - AGE_REFERENCE) / AGE_REFERENCE)
+
+
 def calculate_risk(age: int, income: int, remittance: str, land_area: float):
-    """Simple, explainable score for demo purposes."""
-    income_risk = _clamp((70000 - income) / 70000)
-    age_risk = _clamp(abs(age - 35) / 35)
-    land_risk = _clamp((2.5 - land_area) / 2.5)
-    remittance_risk = 0.25 if remittance == "No" else 0.05
+    """Weighted, explainable score using the local rules engine."""
+    income_risk = _income_risk(income)
+    remittance_risk = _remittance_risk(remittance)
+    land_risk = _land_risk(land_area)
+    age_risk = _age_risk(age)
+
+    weighted_income = income_risk * RISK_WEIGHTS["Income"]
+    weighted_remittance = remittance_risk * RISK_WEIGHTS["Remittance"]
+    weighted_land = land_risk * RISK_WEIGHTS["Land"]
+    weighted_age = age_risk * RISK_WEIGHTS["Age"]
 
     reason_scores = {
-        "Low Monthly Income": income_risk,
-        "No Remittance Inflow": remittance_risk,
-        "Limited Land Collateral": land_risk,
-        "Age Profile": age_risk,
+        "Low Monthly Income": weighted_income,
+        "No Remittance Inflow": weighted_remittance,
+        "Limited Land Collateral": weighted_land,
+        "Age Profile": weighted_age,
     }
 
-    # Weighted sum gives a normalized risk score from 0 to 1.
-    risk_score = (
-        (income_risk * 0.45)
-        + (remittance_risk * 0.20)
-        + (land_risk * 0.20)
-        + (age_risk * 0.15)
-    )
+    risk_score = weighted_income + weighted_remittance + weighted_land + weighted_age
     component_df = pd.DataFrame(
         [
-            {"Factor": "Income", "Raw Risk": income_risk, "Weight": 0.45, "Weighted Contribution": income_risk * 0.45},
-            {"Factor": "Remittance", "Raw Risk": remittance_risk, "Weight": 0.20, "Weighted Contribution": remittance_risk * 0.20},
-            {"Factor": "Land Collateral", "Raw Risk": land_risk, "Weight": 0.20, "Weighted Contribution": land_risk * 0.20},
-            {"Factor": "Age Profile", "Raw Risk": age_risk, "Weight": 0.15, "Weighted Contribution": age_risk * 0.15},
+            {"Factor": "Income", "Raw Risk": income_risk, "Weight": RISK_WEIGHTS["Income"], "Weighted Contribution": weighted_income},
+            {"Factor": "Remittance", "Raw Risk": remittance_risk, "Weight": RISK_WEIGHTS["Remittance"], "Weighted Contribution": weighted_remittance},
+            {"Factor": "Land Collateral", "Raw Risk": land_risk, "Weight": RISK_WEIGHTS["Land"], "Weighted Contribution": weighted_land},
+            {"Factor": "Age Profile", "Raw Risk": age_risk, "Weight": RISK_WEIGHTS["Age"], "Weighted Contribution": weighted_age},
         ]
     )
     return _clamp(risk_score), reason_scores, component_df
@@ -243,19 +267,42 @@ def get_borrower_feature_vector(age: int, income: int, remittance: str, land_are
     )
 
 
-def _scale_contributions_to_target(base_value: float, contributions: np.ndarray, target_prediction: float) -> np.ndarray:
-    current_prediction = float(base_value + np.sum(contributions))
-    target_delta = float(target_prediction - base_value)
-    current_delta = float(current_prediction - base_value)
-    if abs(current_delta) < 1e-9:
-        if len(contributions) == 0:
-            return contributions
-        return np.full(len(contributions), target_delta / len(contributions), dtype=float)
-    return contributions * (target_delta / current_delta)
+@dataclass
+class MockShapOutput:
+    values: np.ndarray
+    base_values: float
+    data: np.ndarray
+    feature_names: list[str]
 
 
-def build_shap_explanation(feature_vector: pd.DataFrame, target_prediction: float = 0.28):
-    """Build SHAP payload from the loaded model explainer."""
+class MockExplainer:
+    """Local explainer that mirrors the SHAP output structure."""
+
+    def __call__(self, feature_vector: pd.DataFrame) -> MockShapOutput:
+        row = feature_vector.iloc[0]
+        income_risk = _income_risk(int(row["Monthly Income"]))
+        remittance_risk = _remittance_risk("Yes" if float(row["Remittance"]) >= 0.5 else "No")
+        land_risk = _land_risk(float(row["Agricultural Land Area"]))
+        age_risk = _age_risk(int(row["Age"]))
+        shap_values = np.array(
+            [
+                income_risk * RISK_WEIGHTS["Income"],
+                remittance_risk * RISK_WEIGHTS["Remittance"],
+                land_risk * RISK_WEIGHTS["Land"],
+                age_risk * RISK_WEIGHTS["Age"],
+            ],
+            dtype=float,
+        )
+        return MockShapOutput(
+            values=shap_values,
+            base_values=0.0,
+            data=row.to_numpy(dtype=float).reshape(1, -1),
+            feature_names=list(feature_vector.columns),
+        )
+
+
+def build_shap_explanation(feature_vector: pd.DataFrame):
+    """Build SHAP payload from the local mock explainer."""
     feature_names = list(feature_vector.columns)
     values = feature_vector.iloc[0].to_numpy(dtype=float)
     model_explainer = st.session_state.get("model_explainer")
@@ -269,24 +316,23 @@ def build_shap_explanation(feature_vector: pd.DataFrame, target_prediction: floa
 
     shap_array = np.array(shap_output.values)
     if shap_array.ndim == 3:
-        # For classifier outputs, use the contribution values of the positive class.
         shap_values = shap_array[0, :, -1].astype(float)
     else:
-        shap_values = shap_array[0].astype(float)
+        shap_values = shap_array.reshape(-1).astype(float)
 
     base_array = np.array(shap_output.base_values)
     base_value = float(base_array.reshape(-1)[-1])
     data_values = np.array(shap_output.data)[0].astype(float) if getattr(shap_output, "data", None) is not None else values
     raw_names = list(getattr(shap_output, "feature_names", feature_names))
     feature_names = [FEATURE_NAME_MAP.get(name, name) for name in raw_names]
-    shap_values = _scale_contributions_to_target(base_value, shap_values, target_prediction)
+    final_prediction = float(base_value + np.sum(shap_values))
     return {
         "values": shap_values,
         "base_value": base_value,
         "current_values": data_values,
         "feature_names": feature_names,
-        "final_prediction": target_prediction,
-        "source": "model_explainer",
+        "final_prediction": final_prediction,
+        "source": "mock_explainer",
     }
 
 
@@ -434,55 +480,13 @@ def get_recommendation(risk_band: str) -> str:
 
 
 def initialize_model_and_explainer():
-    """Load model and initialize SHAP explainer once per session."""
+    """Initialize the local mock explainer once per session."""
     if st.session_state.get("model_explainer") is not None:
         return
 
-    model = st.session_state.get("model")
-    model_path = st.session_state.get("model_path", "model.pkl")
-
-    if model is None and os.path.exists(model_path):
-        try:
-            import joblib
-
-            model = joblib.load(model_path)
-            st.session_state["model"] = model
-            st.session_state["model_id"] = os.path.splitext(os.path.basename(model_path))[0]
-        except Exception as error:
-            st.session_state["model_explainer_error"] = f"Model load failed: {error}"
-            return
-
-    if model is None:
-        st.session_state["model_explainer_error"] = (
-            "Model not found. Set st.session_state['model'] or provide a model file via st.session_state['model_path']."
-        )
-        return
-
-    try:
-        import shap
-
-        background_data = pd.DataFrame(
-            [
-                {"Age": 35.0, "Monthly Income": 60000.0, "Remittance": 1.0, "Agricultural Land Area": 1.5},
-                {"Age": 29.0, "Monthly Income": 45000.0, "Remittance": 0.0, "Agricultural Land Area": 0.8},
-                {"Age": 42.0, "Monthly Income": 90000.0, "Remittance": 1.0, "Agricultural Land Area": 2.2},
-            ],
-            columns=FEATURE_COLUMNS,
-        )
-
-        if hasattr(model, "predict_proba"):
-            predictor = lambda x: model.predict_proba(x)[:, 1]
-        else:
-            predictor = lambda x: model.predict(x)
-
-        st.session_state["model_explainer"] = shap.Explainer(
-            predictor,
-            background_data,
-            feature_names=FEATURE_COLUMNS,
-        )
-        st.session_state.pop("model_explainer_error", None)
-    except Exception as error:
-        st.session_state["model_explainer_error"] = f"Explainer initialization failed: {error}"
+    st.session_state["model_explainer"] = MockExplainer()
+    st.session_state["model_id"] = DEFAULT_MODEL_ID
+    st.session_state.pop("model_explainer_error", None)
 
 # --- SIDEBAR: BRANDING + CONTROLS ---
 initialize_model_and_explainer()
@@ -612,7 +616,7 @@ with output_col:
                             f"Baseline: {shap_payload['base_value'] * 100:.1f}/100 | "
                             f"Final Prediction: {shap_payload['final_prediction'] * 100:.0f}/100"
                         )
-                        st.caption("Source: Your model explainer (calibrated to 28/100 for presentation)")
+                        st.caption("Source: Local mock explainer using Income 45%, Remittance 20%, Land 20%, Age 15%")
                     with right_col:
                         st.markdown("#### Component-level Detail Table")
                         detail_df = component_df[["Factor", "Raw Risk", "Weight"]].copy()
@@ -634,7 +638,7 @@ with output_col:
                             f"Baseline: {shap_payload['base_value'] * 100:.1f}/100 | "
                             f"Final Prediction: {shap_payload['final_prediction'] * 100:.0f}/100"
                         )
-                        st.caption("Source: Your model explainer (calibrated to 28/100 for presentation)")
+                        st.caption("Source: Local mock explainer using Income 45%, Remittance 20%, Land 20%, Age 15%")
 
                     contrib_df = pd.DataFrame(
                         {
@@ -667,8 +671,8 @@ with output_col:
             f"Model ID: {model_id_used}",
             "",
             "Decision Snapshot",
-            "Risk Score: 28/100",
-            "Model Confidence: 72.0%",
+            f"Risk Score: {risk_percent}/100",
+            f"Model Confidence: {confidence:.1%}",
             f"Assessment Timestamp: {report_timestamp}",
             "",
             "Borrower Inputs",
@@ -710,3 +714,4 @@ with output_col:
     else:
         st.info("Enter borrower details and click 'Run Risk Assessment' to view the dashboard.")
     st.markdown('</div>', unsafe_allow_html=True)
+train_model.py
