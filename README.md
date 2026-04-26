@@ -9,7 +9,7 @@ An explainable AI (XAI) risk assessment dashboard for transparent and practical 
 
 यो प्रणाली Global IME Bank का लागि बनाइएको Explainable AI (XAI) आधारित जोखिम मूल्याङ्कन ड्यासबोर्ड हो, जसले पारदर्शी र व्यवहारिक ऋण निर्णय सहयोग प्रदान गर्छ।
 
-## Features
+## Key Features
 
 - **Real-time XAI**
   - Live risk score updates as applicant inputs change.
@@ -20,6 +20,9 @@ An explainable AI (XAI) risk assessment dashboard for transparent and practical 
 - **Nepali Customer View**
   - Includes Sajilo Natija mode for customer-facing Nepali messaging.
   - Provides plain-language guidance and What-If suggestions.
+- **Advanced Fraud Prevention**
+  - Combines e-KYC identity verification flow with simulated CIB API checks to strengthen applicant validation.
+  - Demonstrates layered fraud-screening controls often used in real-world digital banking workflows.
 
 ## विशेषताहरू (Nepali)
 
@@ -45,6 +48,12 @@ An explainable AI (XAI) risk assessment dashboard for transparent and practical 
 - **Real-world Workflow and NRB 2025 Alignment**
   - Together, these simulations showcase an end-to-end banking decision-support journey, from applicant profiling to explainable recommendation.
   - The workflow supports transparency, traceability, and human-review readiness aligned with NRB 2025 compliance expectations.
+
+## Compliance
+
+- **NRB AI Guidelines 2025**
+  - The application is structured to reflect NRB AI Guidelines 2025 principles, including transparency, traceability, and human-in-the-loop review.
+  - Simulated explainability, verification checkpoints, and advisory outputs are included to model compliance-oriented banking operations.
 
 ## Project Structure
 

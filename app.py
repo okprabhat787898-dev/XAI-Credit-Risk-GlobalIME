@@ -31,6 +31,8 @@ st.set_page_config(page_title=f"XAI-RAS v{APP_VERSION} | Global IME Bank", page_
 
 if "cib_verified" not in st.session_state:
     st.session_state.cib_verified = False
+if "ekyc_verified" not in st.session_state:
+    st.session_state.ekyc_verified = False
 
 st.markdown(
     """
@@ -327,6 +329,14 @@ with st.sidebar:
         st.session_state.cib_verified = True
     if st.session_state.cib_verified:
         st.success("CIB Report Retrieved: Score 742 (Good)")
+    st.divider()
+    st.subheader("Identity Verification")
+    if st.button("🆔 Start e-KYC Verification", use_container_width=True):
+        with st.spinner("Verifying Citizensip/PAN with Government Portal..."):
+            time.sleep(2)
+        st.session_state.ekyc_verified = True
+    if st.session_state.ekyc_verified:
+        st.success("e-KYC Verified: Identity Confirmed")
     st.markdown('</div>', unsafe_allow_html=True)
 
 assessment = assess_applicant(applicant_age, monthly_income, remittance_status, land_area, loan_to_income_ratio)
@@ -427,6 +437,10 @@ with bottom_col:
         )
         st.write("")
         st.info("यो स्कोरले ऋण निर्णयको प्रारम्भिक संकेत मात्र देखाउँछ। अन्तिम निर्णय बैंकको प्रक्रिया अनुसार हुनेछ।")
+        if st.session_state.ekyc_verified:
+            st.success("✅ तपाईंको पहिचान (e-KYC) सफलतापूर्वक प्रमाणित भएको छ।")
+        else:
+            st.warning("कृपया आफ्नो पहिचान प्रमाणित गर्न e-KYC प्रक्रिया पूरा गर्नुहोस्।")
         if assessment["label"] in {"MEDIUM RISK", "HIGH RISK"}:
             st.markdown("**What-If सुझाव**")
             st.info(
