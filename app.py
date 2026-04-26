@@ -449,8 +449,8 @@ with bottom_col:
         st.download_button(
             "Download Audit Report",
             data=audit_report_text,
-            file_name="Global_IME_Audit_Report.pdf",
-            mime="application/pdf",
+            file_name="Global_IME_Audit_Report.txt",
+            mime="text/plain",
             use_container_width=True,
         )
     else:
