@@ -160,7 +160,7 @@ def age_risk(age: int) -> float:
     return clamp(abs(float(age) - AGE_REFERENCE) / AGE_SPREAD)
 
 
-def assess_applicant(age: int, income: int, remittance_status: int, land_area: float) -> dict:
+def assess_applicant(age: int, income: int, remittance_status: int, land_area: float, loan_to_income_ratio: float = 0.0) -> dict:
     factor_risks = {
         "Income": income_risk(income),
         "Remittance": remittance_risk(remittance_status),
@@ -168,6 +168,16 @@ def assess_applicant(age: int, income: int, remittance_status: int, land_area: f
         "Age": age_risk(age),
     }
     score = sum(factor_risks[name] * weight for name, weight in RISK_WEIGHTS.items()) * 100.0
+    
+    # Apply loan-to-income ratio adjustment
+    if loan_to_income_ratio > 5:
+        score += 25
+    elif 3 <= loan_to_income_ratio <= 5:
+        score += 10
+    
+    # Cap the score at 100
+    score = min(score, 100.0)
+    
     contributions = {
         name: (factor_risks[name] - 0.5) * RISK_WEIGHTS[name] * 100.0 for name in RISK_WEIGHTS
     }
@@ -274,6 +284,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Applicant Inputs")
     monthly_income = st.slider("Monthly Income (NPR)", min_value=0, max_value=200000, value=50000, step=1000)
+    loan_amount = st.slider("Desired Loan Amount (ऋण रकम) (NPR)", min_value=50000, max_value=5000000, value=500000, step=50000)
     remittance_status = st.slider(
         "Remittance Status",
         min_value=0,
@@ -285,9 +296,14 @@ with st.sidebar:
     land_area = st.slider("Land Area (Ropani)", min_value=0.0, max_value=20.0, value=1.0, step=0.1)
     applicant_age = st.slider("Applicant Age", min_value=18, max_value=80, value=30, step=1)
     st.caption(f"Remittance selected: {'Received' if remittance_status == 1 else 'Not received'}")
+    
+    # Calculate loan-to-income ratio
+    annual_income = monthly_income * 12
+    loan_to_income_ratio = loan_amount / annual_income if annual_income > 0 else 0.0
+    st.caption(f"Loan-to-Income Ratio: {loan_to_income_ratio:.2f}x (Loan ÷ Annual Income)")
     st.markdown('</div>', unsafe_allow_html=True)
 
-assessment = assess_applicant(applicant_age, monthly_income, remittance_status, land_area)
+assessment = assess_applicant(applicant_age, monthly_income, remittance_status, land_area, loan_to_income_ratio)
 
 st.markdown(
     f'''
@@ -386,3 +402,17 @@ with bottom_col:
         st.write("")
         st.info("यो स्कोरले ऋण निर्णयको प्रारम्भिक संकेत मात्र देखाउँछ। अन्तिम निर्णय बैंकको प्रक्रिया अनुसार हुनेछ।")
     st.markdown("</div>", unsafe_allow_html=True)
+
+st.divider()
+
+st.markdown('<div class="panel-card">', unsafe_allow_html=True)
+st.subheader("तपाईंको लागि हाम्रो सुझाव (Our Advice)")
+
+if loan_to_income_ratio > 5:
+    st.warning("⚠️ ऋण रकम आपको वार्षिक आय भन्दा अत्यधिक छ। कृपया कम रकमको लागि आवेदन गर्ने विचार गर्नुहोस्।")
+elif assessment['score'] < 40:
+    st.success("✓ आपको आर्थिक प्रोफाइल राम्रोसँग संतुलित छ। आपको आवेदन स्वीकृत हुने सम्भावना राम्रो छ।")
+else:
+    st.info("ℹ️ आपको आवेदन विस्तृत समीक्षा गरिँदै छ। कृपया धैर्य राख्नुहोस्।")
+
+st.markdown("</div>", unsafe_allow_html=True)
