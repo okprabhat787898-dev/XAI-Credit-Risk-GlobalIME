@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
 # --- PAGE CONFIGURATION ---
@@ -8,9 +9,30 @@ st.set_page_config(page_title="XAI-RAS: Global IME Bank", layout="wide")
 st.markdown(
     """
     <style>
+    :root {
+        --bank-navy: #0b1f3a;
+        --bank-navy-soft: #123053;
+        --bank-blue: #0f62d6;
+        --text-strong: #0b1f3a;
+        --text-muted: #274a7c;
+        --chart-bg: #0d1f36;
+        --chart-grid: #2b3f5f;
+    }
     .stApp {
         background: radial-gradient(circle at top right, #f4f9ff 0%, #e9f2ff 35%, #f8fbff 65%, #ffffff 100%);
     }
+    .main .block-container {
+        padding-top: 2.2rem;
+        padding-bottom: 2.2rem;
+    }
+    h1, h2, h3 {
+        color: var(--text-strong);
+        font-weight: 800;
+        letter-spacing: 0.01em;
+    }
+    h1 { font-size: 2.3rem; }
+    h2 { font-size: 1.75rem; }
+    h3 { font-size: 1.35rem; }
     div[data-testid="stMetric"] {
         background: rgba(255, 255, 255, 0.85);
         border: 1px solid #d8e5ff;
@@ -23,6 +45,80 @@ st.markdown(
         padding: 14px 16px;
         border-radius: 14px;
         box-shadow: 0 8px 24px rgba(15, 98, 214, 0.25);
+    }
+    .dashboard-container {
+        border: 1px solid #dbe6fb;
+        border-radius: 16px;
+        padding: 16px;
+        background: rgba(255, 255, 255, 0.78);
+        box-shadow: 0 8px 22px rgba(17, 56, 112, 0.08);
+        margin-bottom: 14px;
+    }
+    .metric-card {
+        border: 1px solid rgba(7, 31, 69, 0.12);
+        border-radius: 14px;
+        box-shadow: 0 4px 14px rgba(18, 38, 63, 0.09);
+        padding: 12px 14px;
+    }
+    .metric-label {
+        font-size: 0.82rem;
+        letter-spacing: 0.03em;
+        color: #274a7c;
+        text-transform: uppercase;
+        font-weight: 600;
+        margin-bottom: 3px;
+    }
+    .metric-value {
+        font-size: 1.55rem;
+        font-weight: 700;
+        color: #0d1f3b;
+        line-height: 1.15;
+    }
+    .panel-shell {
+        border: 1px solid #dbe6fb;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.82);
+        box-shadow: 0 8px 22px rgba(17, 56, 112, 0.08);
+        padding: 18px;
+    }
+    .panel-gap {
+        min-height: 1px;
+    }
+    .sidebar-brand {
+        background: linear-gradient(130deg, #0b3c88, #0f62d6);
+        color: #ffffff;
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+    }
+    .version-badge {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid #cfe0ff;
+        background: #eef5ff;
+        color: #1d4f9a;
+        font-size: 0.78rem;
+        font-weight: 600;
+    }
+    @media (max-width: 1400px) {
+        .main .block-container {
+            padding-top: 1.55rem;
+            padding-bottom: 1.55rem;
+        }
+        h1 { font-size: 2.0rem; }
+        h2 { font-size: 1.55rem; }
+        h3 { font-size: 1.2rem; }
+        .metric-value { font-size: 1.28rem; }
+        .panel-shell { padding: 14px; }
+    }
+    @media (max-width: 1100px) {
+        h1 { font-size: 1.72rem; }
+        h2 { font-size: 1.35rem; }
+        .metric-label { font-size: 0.74rem; }
+        .metric-value { font-size: 1.12rem; }
     }
     </style>
     """,
@@ -74,36 +170,200 @@ def get_decision(risk_score: float):
     return "HIGH RISK", "Likely Reject", st.error
 
 
-def render_risk_gauge(risk_percent: int):
+def get_risk_theme(risk_band: str):
+    if risk_band == "LOW RISK":
+        return {"bg": "#e9f8ef", "accent": "#1f7a45"}
+    if risk_band == "MEDIUM RISK":
+        return {"bg": "#fff8dc", "accent": "#9a6b00"}
+    return {"bg": "#ffe9e9", "accent": "#a32525"}
+
+
+def render_metric_cards(risk_percent: int, confidence: float, risk_band: str, gauge_height: int):
+    theme = get_risk_theme(risk_band)
+    c1, c2, c3 = st.columns(3, gap="medium")
+    with c1:
+        st.markdown(
+            f"""
+            <div class="metric-card" style="background:{theme['bg']}; border-left:5px solid {theme['accent']};">
+                <div class="metric-label">Risk Score</div>
+                <div class="metric-value">{risk_percent}/100</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f"""
+            <div class="metric-card" style="background:{theme['bg']}; border-left:5px solid {theme['accent']};">
+                <div class="metric-label">Model Confidence</div>
+                <div class="metric-value">{confidence:.1%}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c3:
+        band_col, gauge_col = st.columns([1.05, 1.15], gap="small")
+        with band_col:
+            st.markdown(
+                f"""
+                <div class="metric-card" style="background:{theme['bg']}; border-left:5px solid {theme['accent']};">
+                    <div class="metric-label">Risk Band</div>
+                    <div class="metric-value">{risk_band}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with gauge_col:
+            render_risk_gauge(risk_percent, chart_height=gauge_height)
+
+
+def build_shap_explanation(age: int, income: int, remittance: str, land_area: float):
+    """Create a SHAP Explanation object for the current applicant using baseline comparisons."""
+    feature_names = ["Monthly Income", "Remittance", "Land Collateral", "Age Profile"]
+    weights = np.array([0.45, 0.20, 0.20, 0.15], dtype=float)
+
+    current_values = np.array(
+        [
+            _clamp((70000 - income) / 70000),
+            0.25 if remittance == "No" else 0.05,
+            _clamp((2.5 - land_area) / 2.5),
+            _clamp(abs(age - 35) / 35),
+        ],
+        dtype=float,
+    )
+
+    baseline_values = np.array(
+        [
+            _clamp((70000 - 60000) / 70000),  # Baseline income profile
+            0.05,  # Baseline assumes regular remittance
+            _clamp((2.5 - 1.5) / 2.5),  # Baseline collateral profile
+            _clamp(abs(35 - 35) / 35),  # Baseline prime age
+        ],
+        dtype=float,
+    )
+
+    shap_values = (current_values - baseline_values) * weights
+    base_value = float(np.sum(baseline_values * weights))
+
+    explanation = {
+        "values": shap_values,
+        "base_value": base_value,
+        "current_values": current_values,
+        "feature_names": feature_names,
+    }
+    return explanation
+
+
+def render_risk_gauge(risk_percent: int, chart_height: int = 185):
     try:
         import plotly.graph_objects as go
 
-        fig = go.Figure(
-            go.Indicator(
-                mode="gauge+number",
-                value=risk_percent,
-                number={"suffix": "/100", "font": {"size": 42}},
-                gauge={
-                    "axis": {"range": [0, 100]},
-                    "bar": {"color": "#0f62d6", "thickness": 0.35},
-                    "steps": [
-                        {"range": [0, 35], "color": "#d6f5e8"},
-                        {"range": [35, 65], "color": "#fff4cc"},
-                        {"range": [65, 100], "color": "#ffe0e0"},
-                    ],
-                    "threshold": {
-                        "line": {"color": "#0b3c88", "width": 4},
-                        "thickness": 0.75,
-                        "value": risk_percent,
-                    },
-                },
-                title={"text": "Risk Gauge", "font": {"size": 24}},
+        steps = 60
+        start_rgb = np.array([41, 171, 91])
+        end_rgb = np.array([219, 68, 55])
+        gradient_colors = []
+        for i in range(steps):
+            t = i / (steps - 1)
+            rgb = (1 - t) * start_rgb + t * end_rgb
+            gradient_colors.append(f"rgb({int(rgb[0])},{int(rgb[1])},{int(rgb[2])})")
+
+        theta = np.pi * (1 - risk_percent / 100)
+        needle_x = 0.5 + 0.36 * np.cos(theta)
+        needle_y = 0.5 + 0.36 * np.sin(theta)
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Pie(
+                values=[1] * steps + [steps],
+                marker=dict(colors=gradient_colors + ["rgba(0,0,0,0)"], line=dict(width=0)),
+                hole=0.70,
+                rotation=180,
+                direction="clockwise",
+                sort=False,
+                textinfo="none",
+                hoverinfo="skip",
+                showlegend=False,
             )
         )
-        fig.update_layout(height=330, margin=dict(l=15, r=15, t=50, b=10), paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+
+        fig.add_shape(
+            type="line",
+            x0=0.5,
+            y0=0.5,
+            x1=needle_x,
+            y1=needle_y,
+            xref="paper",
+            yref="paper",
+            line=dict(color="#0d1f3b", width=3),
+        )
+        fig.add_shape(
+            type="circle",
+            x0=0.48,
+            y0=0.48,
+            x1=0.52,
+            y1=0.52,
+            xref="paper",
+            yref="paper",
+            fillcolor="#0d1f3b",
+            line=dict(color="#0d1f3b"),
+        )
+
+        fig.add_annotation(x=0.5, y=0.30, text=f"<b>{risk_percent}/100</b>", showarrow=False, font=dict(size=15, color="#0d1f3b"))
+        fig.add_annotation(x=0.09, y=0.46, text="0", showarrow=False, font=dict(size=10, color="#2f5c3f"))
+        fig.add_annotation(x=0.91, y=0.46, text="100", showarrow=False, font=dict(size=10, color="#8f2d2d"))
+
+        fig.update_layout(
+            height=chart_height,
+            margin=dict(l=0, r=0, t=8, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#dbe7ff"),
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     except Exception:
         st.progress(risk_percent / 100.0, text=f"Risk Score: {risk_percent}/100")
+
+
+def render_dark_bar_chart(data: pd.DataFrame, x: str, y: str, color: str = "#2db37a", chart_height: int = 270):
+    try:
+        import plotly.express as px
+
+        fig = px.bar(data, x=x, y=y)
+        fig.update_traces(marker_color=color)
+        fig.update_layout(
+            template="plotly_dark",
+            height=chart_height,
+            margin=dict(l=8, r=8, t=16, b=8),
+            paper_bgcolor="#0d1f36",
+            plot_bgcolor="#0d1f36",
+            font=dict(color="#dbe7ff"),
+            xaxis=dict(gridcolor="#2b3f5f"),
+            yaxis=dict(gridcolor="#2b3f5f"),
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    except Exception:
+        st.bar_chart(data, x=x, y=y)
+
+
+def render_dark_line_chart(data: pd.DataFrame, chart_height: int = 270):
+    try:
+        import plotly.express as px
+
+        melt_df = data.reset_index().melt(id_vars="Factor", var_name="Metric", value_name="Value")
+        fig = px.line(melt_df, x="Factor", y="Value", color="Metric", markers=True)
+        fig.update_layout(
+            template="plotly_dark",
+            height=chart_height,
+            margin=dict(l=8, r=8, t=16, b=8),
+            paper_bgcolor="#0d1f36",
+            plot_bgcolor="#0d1f36",
+            font=dict(color="#dbe7ff"),
+            xaxis=dict(gridcolor="#2b3f5f"),
+            yaxis=dict(gridcolor="#2b3f5f"),
+            legend_title_text="",
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    except Exception:
+        st.line_chart(data)
 
 
 def _pdf_escape(text: str) -> str:
@@ -159,9 +419,27 @@ def create_pdf_report(lines):
     )
     return pdf
 
-# --- CUSTOMER/OFFICER TOGGLE (From your paper's Dual-Audience requirement) ---
-st.sidebar.title("View Mode")
-mode = st.sidebar.radio("Select View:", ["Bank Officer (Technical)", "Customer (Plain Nepali)"])
+# --- SIDEBAR: BRANDING + CONTROLS ---
+with st.sidebar:
+    st.markdown('<div class="sidebar-brand">Global IME Bank<br/>XAI-RAS Platform</div>', unsafe_allow_html=True)
+    st.markdown('<div class="version-badge">App Version 1.4.0</div>', unsafe_allow_html=True)
+    st.divider()
+    st.subheader("View Settings")
+    mode = st.radio("Select View:", ["Bank Officer (Technical)", "Customer (Plain Nepali)"])
+    audit_mode_enabled = st.toggle("Audit Mode", value=False, help="Switch between Standard Mode and Audit Mode")
+    display_profile = st.selectbox("Display Profile", ["Auto", "Compact (1366x768)", "Projector"])
+    app_mode_label = "Audit Mode" if audit_mode_enabled else "Standard Mode"
+    st.caption(f"Current Mode: {app_mode_label}")
+
+if display_profile == "Compact (1366x768)":
+    chart_height_main = 220
+    gauge_height = 155
+elif display_profile == "Projector":
+    chart_height_main = 330
+    gauge_height = 215
+else:
+    chart_height_main = 270
+    gauge_height = 185
 
 if mode == "Customer (Plain Nepali)":
     st.title("Customer Risk Check")
@@ -171,17 +449,23 @@ else:
     st.write("Autonomous Credit & Lending Orchestrator | Global IME Bank Hackathon 2026")
 
 # --- DASHBOARD LAYOUT ---
-input_col, output_col = st.columns([1.05, 1.45], gap="large")
+input_col, spacer_col, output_col = st.columns([1.0, 0.12, 1.45], gap="large")
 
 with input_col:
+    st.markdown('<div class="panel-shell">', unsafe_allow_html=True)
     st.subheader("Borrower Input Panel")
     age = st.number_input("Age", min_value=18, max_value=80, value=30)
     income = st.number_input("Monthly Income (NPR)", min_value=0, value=50000, step=1000)
     remittance = st.selectbox("Receives Remittance?", ["Yes", "No"])
     land_area = st.number_input("Agricultural Land Area (Ropani)", min_value=0.0, value=1.0, step=0.1)
     run_assessment = st.button("Run Risk Assessment", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with spacer_col:
+    st.markdown('<div class="panel-gap"></div>', unsafe_allow_html=True)
 
 with output_col:
+    st.markdown('<div class="panel-shell">', unsafe_allow_html=True)
     st.subheader("Decision Dashboard")
     st.caption("Professional summary of model output, confidence, and explainability drivers")
 
@@ -191,16 +475,14 @@ with output_col:
         confidence = 1 - risk_score
         risk_band, status, status_block = get_decision(risk_score)
 
-        chart_col, metrics_col = st.columns([1.2, 1.0], gap="large")
-        with chart_col:
-            render_risk_gauge(risk_percent)
-        with metrics_col:
+        with st.container():
+            st.markdown('<div class="dashboard-container">', unsafe_allow_html=True)
             st.markdown('<div class="premium-card">Decision Snapshot</div>', unsafe_allow_html=True)
-            m1, m2 = st.columns(2)
-            m1.metric("Risk Score", f"{risk_percent}/100")
-            m2.metric("Model Confidence", f"{confidence:.1%}")
-            st.metric("Risk Band", risk_band)
+            st.write("")
+            render_metric_cards(risk_percent, confidence, risk_band, gauge_height=gauge_height)
+            st.write("")
             status_block(f"Decision Track: {status}")
+            st.markdown("</div>", unsafe_allow_html=True)
 
         if mode == "Customer (Plain Nepali)":
             st.markdown("### सजिलो नतिजा")
@@ -225,30 +507,81 @@ with output_col:
                 )
             )
             top3["Factor"] = top3["Reason"].map(reason_label_map).fillna(top3["Reason"])
-            st.bar_chart(top3, x="Factor", y="Impact")
+            render_dark_bar_chart(top3, x="Factor", y="Impact", chart_height=chart_height_main)
         else:
             st.markdown("### Advanced Technical Diagnostics")
             tech_col_1, tech_col_2 = st.columns(2, gap="large")
             with tech_col_1:
                 st.caption("Weighted contributions to final risk score")
-                weighted = component_df[["Factor", "Weighted Contribution"]].set_index("Factor")
-                st.bar_chart(weighted)
+                weighted = component_df[["Factor", "Weighted Contribution"]]
+                render_dark_bar_chart(
+                    weighted,
+                    x="Factor",
+                    y="Weighted Contribution",
+                    color="#3fa7ff",
+                    chart_height=chart_height_main,
+                )
             with tech_col_2:
                 st.caption("Raw risk vs weighted contribution")
                 compare = component_df[["Factor", "Raw Risk", "Weighted Contribution"]].set_index("Factor")
-                st.line_chart(compare)
+                render_dark_line_chart(compare, chart_height=chart_height_main)
 
-            st.caption("Component-level detail table")
-            st.dataframe(
-                component_df.style.format(
+            if audit_mode_enabled:
+                st.markdown("### Feature Weight Audit Table")
+                st.caption("Detailed feature-level weights and contributions used in the scoring model")
+                audit_df = component_df.copy()
+                audit_df["Contribution %"] = audit_df["Weighted Contribution"] * 100
+                st.dataframe(
+                    audit_df.style.format(
+                        {
+                            "Raw Risk": "{:.2f}",
+                            "Weight": "{:.2f}",
+                            "Weighted Contribution": "{:.3f}",
+                            "Contribution %": "{:.1f}%",
+                        }
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Switch to Audit Mode from the sidebar to view detailed feature weights.")
+
+            st.markdown("### XAI Diagnostics")
+            st.caption("Applicant-level SHAP waterfall showing which features pushed risk up or down")
+
+            try:
+                import shap
+                import matplotlib.pyplot as plt
+
+                shap_payload = build_shap_explanation(age, income, remittance, land_area)
+                shap_explanation = shap.Explanation(
+                    values=shap_payload["values"],
+                    base_values=shap_payload["base_value"],
+                    data=shap_payload["current_values"],
+                    feature_names=shap_payload["feature_names"],
+                )
+
+                plt.style.use("dark_background")
+                shap_height = 4.2 if chart_height_main <= 230 else 6.0 if chart_height_main >= 320 else 4.8
+                fig, ax = plt.subplots(figsize=(9, shap_height))
+                fig.patch.set_facecolor("#0d1f36")
+                shap.plots.waterfall(shap_explanation, max_display=4, show=False)
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+
+                contrib_df = pd.DataFrame(
                     {
-                        "Raw Risk": "{:.2f}",
-                        "Weight": "{:.2f}",
-                        "Weighted Contribution": "{:.2f}",
+                        "Feature": shap_payload["feature_names"],
+                        "SHAP Contribution": shap_payload["values"],
                     }
-                ),
-                use_container_width=True,
-            )
+                ).sort_values("SHAP Contribution", key=lambda s: s.abs(), ascending=False)
+                st.dataframe(
+                    contrib_df.style.format({"SHAP Contribution": "{:+.3f}"}),
+                    use_container_width=True,
+                )
+            except Exception:
+                st.warning(
+                    "SHAP diagnostics unavailable. Install dependencies with: pip install shap matplotlib"
+                )
 
         top_reasons = sorted(reason_scores.items(), key=lambda item: item[1], reverse=True)[:3]
         report_lines = [
@@ -280,3 +613,4 @@ with output_col:
         )
     else:
         st.info("Enter borrower details and click 'Run Risk Assessment' to view the dashboard.")
+    st.markdown('</div>', unsafe_allow_html=True)
