@@ -1,10 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
 from datetime import datetime
 
 APP_VERSION = "1.4.0"
 DEFAULT_MODEL_ID = "XAI-RAS-ENSEMBLE-v1"
+FEATURE_COLUMNS = ["Age", "Monthly Income", "Remittance", "Agricultural Land Area"]
+FEATURE_NAME_MAP = {
+    "Monthly Income": "Income",
+    "Remittance": "Remittance",
+    "Agricultural Land Area": "Land",
+    "Age": "Age",
+}
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="XAI-RAS: Global IME Bank", layout="wide")
@@ -230,7 +238,8 @@ def get_borrower_feature_vector(age: int, income: int, remittance: str, land_are
                 "Remittance": 1.0 if remittance == "Yes" else 0.0,
                 "Agricultural Land Area": float(land_area),
             }
-        ]
+        ],
+        columns=FEATURE_COLUMNS,
     )
 
 
@@ -258,10 +267,18 @@ def build_shap_explanation(feature_vector: pd.DataFrame, target_prediction: floa
     if not (hasattr(shap_output, "values") and hasattr(shap_output, "base_values")):
         raise ValueError("Explainer output is not compatible with SHAP waterfall")
 
-    shap_values = np.array(shap_output.values)[0].astype(float)
-    base_value = float(np.array(shap_output.base_values).reshape(-1)[0])
+    shap_array = np.array(shap_output.values)
+    if shap_array.ndim == 3:
+        # For classifier outputs, use the contribution values of the positive class.
+        shap_values = shap_array[0, :, -1].astype(float)
+    else:
+        shap_values = shap_array[0].astype(float)
+
+    base_array = np.array(shap_output.base_values)
+    base_value = float(base_array.reshape(-1)[-1])
     data_values = np.array(shap_output.data)[0].astype(float) if getattr(shap_output, "data", None) is not None else values
-    feature_names = list(getattr(shap_output, "feature_names", feature_names))
+    raw_names = list(getattr(shap_output, "feature_names", feature_names))
+    feature_names = [FEATURE_NAME_MAP.get(name, name) for name in raw_names]
     shap_values = _scale_contributions_to_target(base_value, shap_values, target_prediction)
     return {
         "values": shap_values,
@@ -415,7 +432,61 @@ def get_recommendation(risk_band: str) -> str:
         return "Escalate to Human-in-the-Loop Credit Review"
     return "Do Not Proceed Without Senior Credit Committee Approval"
 
+
+def initialize_model_and_explainer():
+    """Load model and initialize SHAP explainer once per session."""
+    if st.session_state.get("model_explainer") is not None:
+        return
+
+    model = st.session_state.get("model")
+    model_path = st.session_state.get("model_path", "model.pkl")
+
+    if model is None and os.path.exists(model_path):
+        try:
+            import joblib
+
+            model = joblib.load(model_path)
+            st.session_state["model"] = model
+            st.session_state["model_id"] = os.path.splitext(os.path.basename(model_path))[0]
+        except Exception as error:
+            st.session_state["model_explainer_error"] = f"Model load failed: {error}"
+            return
+
+    if model is None:
+        st.session_state["model_explainer_error"] = (
+            "Model not found. Set st.session_state['model'] or provide a model file via st.session_state['model_path']."
+        )
+        return
+
+    try:
+        import shap
+
+        background_data = pd.DataFrame(
+            [
+                {"Age": 35.0, "Monthly Income": 60000.0, "Remittance": 1.0, "Agricultural Land Area": 1.5},
+                {"Age": 29.0, "Monthly Income": 45000.0, "Remittance": 0.0, "Agricultural Land Area": 0.8},
+                {"Age": 42.0, "Monthly Income": 90000.0, "Remittance": 1.0, "Agricultural Land Area": 2.2},
+            ],
+            columns=FEATURE_COLUMNS,
+        )
+
+        if hasattr(model, "predict_proba"):
+            predictor = lambda x: model.predict_proba(x)[:, 1]
+        else:
+            predictor = lambda x: model.predict(x)
+
+        st.session_state["model_explainer"] = shap.Explainer(
+            predictor,
+            background_data,
+            feature_names=FEATURE_COLUMNS,
+        )
+        st.session_state.pop("model_explainer_error", None)
+    except Exception as error:
+        st.session_state["model_explainer_error"] = f"Explainer initialization failed: {error}"
+
 # --- SIDEBAR: BRANDING + CONTROLS ---
+initialize_model_and_explainer()
+
 with st.sidebar:
     st.markdown('<div class="sidebar-brand">Global IME Bank<br/>XAI-RAS Platform</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="version-badge">App Version {APP_VERSION}</div>', unsafe_allow_html=True)
@@ -579,8 +650,9 @@ with output_col:
                         )
                 plt.close(fig)
             except Exception:
+                explainer_error = st.session_state.get("model_explainer_error", "Unknown error")
                 st.warning(
-                    "SHAP waterfall unavailable. Ensure your trained explainer is loaded in st.session_state['model_explainer']."
+                    f"SHAP waterfall unavailable. {explainer_error}"
                 )
 
         top_reasons = sorted(reason_scores.items(), key=lambda item: item[1], reverse=True)[:3]
