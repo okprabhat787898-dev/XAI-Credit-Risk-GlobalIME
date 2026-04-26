@@ -7,6 +7,7 @@ import streamlit as st
 APP_VERSION = "1.4.0"
 RED = "#C5161D"
 BLUE = "#004189"
+RISK_REDUCTION_BLUE = "#1d4ed8"
 TEXT = "#10233f"
 MUTED = "#50627f"
 CARD = "#ffffff"
@@ -226,7 +227,7 @@ def render_score_chart(contributions: dict[str, float]):
         order = np.argsort(np.abs(values))[::-1]
         ordered_labels = [labels[index] for index in order]
         ordered_values = values[order]
-        colors = [RED if value >= 0 else BLUE for value in ordered_values]
+        colors = [RED if value >= 0 else RISK_REDUCTION_BLUE for value in ordered_values]
 
         fig = go.Figure(
             go.Bar(
@@ -284,7 +285,15 @@ with st.sidebar:
     st.divider()
     st.subheader("Applicant Inputs")
     monthly_income = st.slider("Monthly Income (NPR)", min_value=0, max_value=200000, value=50000, step=1000)
-    loan_amount = st.slider("Desired Loan Amount (ऋण रकम) (NPR)", min_value=50000, max_value=5000000, value=500000, step=50000)
+    loan_affordability_help = "Loan-to-Income Ratio evaluates the requested loan amount against your total annual earnings to measure affordability"
+    loan_amount = st.slider(
+        "Desired Loan Amount (ऋण रकम) (NPR)",
+        min_value=50000,
+        max_value=5000000,
+        value=500000,
+        step=50000,
+        help=loan_affordability_help,
+    )
     remittance_status = st.slider(
         "Remittance Status",
         min_value=0,
@@ -300,7 +309,14 @@ with st.sidebar:
     # Calculate loan-to-income ratio
     annual_income = monthly_income * 12
     loan_to_income_ratio = loan_amount / annual_income if annual_income > 0 else 0.0
-    st.caption(f"Loan-to-Income Ratio: {loan_to_income_ratio:.2f}x (Loan ÷ Annual Income)")
+    max_loan_under_3x = max(0, int(annual_income * 3) - 1)
+    suggested_lower_amount = max(0, min(max_loan_under_3x, loan_amount - 50000))
+    st.metric(
+        "Loan-to-Income Ratio",
+        f"{loan_to_income_ratio:.2f}x",
+        help=loan_affordability_help,
+    )
+    st.caption("Loan ÷ Annual Income")
     st.markdown('</div>', unsafe_allow_html=True)
 
 assessment = assess_applicant(applicant_age, monthly_income, remittance_status, land_area, loan_to_income_ratio)
@@ -401,6 +417,11 @@ with bottom_col:
         )
         st.write("")
         st.info("यो स्कोरले ऋण निर्णयको प्रारम्भिक संकेत मात्र देखाउँछ। अन्तिम निर्णय बैंकको प्रक्रिया अनुसार हुनेछ।")
+        if assessment["label"] in {"MEDIUM RISK", "HIGH RISK"}:
+            st.markdown("**What-If सुझाव**")
+            st.info(
+                f"सुझाव: यदि तपाईंले ऋणको रकम Rs. {suggested_lower_amount:,.0f} मा घटाउनुभयो भने, तपाईंको स्वीकृत हुने सम्भावना बढ्नेछ।"
+            )
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.divider()
