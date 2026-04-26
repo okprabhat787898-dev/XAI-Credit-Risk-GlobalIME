@@ -275,21 +275,62 @@ class MockShapOutput:
     feature_names: list[str]
 
 
-class MockExplainer:
-    """Local explainer that mirrors the SHAP output structure."""
+@dataclass
+class MockShapExplanation:
+    values: np.ndarray
+    base_values: float
+    data: np.ndarray
+    feature_names: list[str]
 
-    def __call__(self, feature_vector: pd.DataFrame) -> MockShapOutput:
-        row = feature_vector.iloc[0]
+
+class LendingModel:
+    """Rule-based lending model that uses the configured borrower weights."""
+
+    def __init__(self, weights: dict[str, float] | None = None):
+        self.weights = dict(weights or RISK_WEIGHTS)
+
+    def predict_row(self, row: pd.Series) -> float:
         income_risk = _income_risk(int(row["Monthly Income"]))
         remittance_risk = _remittance_risk("Yes" if float(row["Remittance"]) >= 0.5 else "No")
         land_risk = _land_risk(float(row["Agricultural Land Area"]))
         age_risk = _age_risk(int(row["Age"]))
+
+        score = (
+            income_risk * self.weights["Income"]
+            + remittance_risk * self.weights["Remittance"]
+            + land_risk * self.weights["Land"]
+            + age_risk * self.weights["Age"]
+        )
+        return _clamp(score)
+
+    def predict(self, feature_vector: pd.DataFrame) -> np.ndarray:
+        return np.array([self.predict_row(row) for _, row in feature_vector.iterrows()], dtype=float)
+
+    def predict_proba(self, feature_vector: pd.DataFrame) -> np.ndarray:
+        scores = self.predict(feature_vector)
+        return np.column_stack([1.0 - scores, scores])
+
+
+class MockShapExplainer:
+    """Local explainer that mirrors the SHAP output structure."""
+
+    def __init__(self, model: LendingModel):
+        self.model = model
+
+    def __call__(self, feature_vector: pd.DataFrame) -> MockShapOutput:
+        row = feature_vector.iloc[0]
+        _ = self.model.predict(feature_vector)[0]
+        income_risk = _income_risk(int(row["Monthly Income"]))
+        remittance_risk = _remittance_risk("Yes" if float(row["Remittance"]) >= 0.5 else "No")
+        land_risk = _land_risk(float(row["Agricultural Land Area"]))
+        age_risk = _age_risk(int(row["Age"]))
+        weights = self.model.weights
         shap_values = np.array(
             [
-                income_risk * RISK_WEIGHTS["Income"],
-                remittance_risk * RISK_WEIGHTS["Remittance"],
-                land_risk * RISK_WEIGHTS["Land"],
-                age_risk * RISK_WEIGHTS["Age"],
+                income_risk * weights["Income"],
+                remittance_risk * weights["Remittance"],
+                land_risk * weights["Land"],
+                age_risk * weights["Age"],
             ],
             dtype=float,
         )
@@ -301,7 +342,50 @@ class MockExplainer:
         )
 
 
-def build_shap_explanation(feature_vector: pd.DataFrame):
+class MockShapModule:
+    Explainer = MockShapExplainer
+    Explanation = MockShapExplanation
+
+    @staticmethod
+    def waterfall_plot(explanation, max_display: int = 4, show: bool = True):
+        import matplotlib.pyplot as plt
+
+        values = np.array(getattr(explanation, "values", []), dtype=float).reshape(-1)
+        feature_names = list(getattr(explanation, "feature_names", []))
+        data = np.array(getattr(explanation, "data", []), dtype=float).reshape(-1)
+
+        if not feature_names:
+            feature_names = [f"Feature {index + 1}" for index in range(len(values))]
+
+        order = np.argsort(np.abs(values))[::-1][:max_display]
+        selected_values = values[order]
+        selected_names = [feature_names[index] for index in order]
+        selected_data = [data[index] if index < len(data) else np.nan for index in order]
+        colors = ["#1f7a45" if value >= 0 else "#a32525" for value in selected_values]
+
+        ax = plt.gca()
+        ax.barh(range(len(selected_values)), selected_values[::-1], color=colors[::-1], alpha=0.95)
+        ax.set_yticks(range(len(selected_names)))
+        ax.set_yticklabels(
+            [
+                f"{FEATURE_NAME_MAP.get(name, name)} = {value:g}"
+                for name, value in zip(selected_names[::-1], selected_data[::-1])
+            ],
+            color="#dbe7ff",
+        )
+        ax.axvline(0, color="#dbe7ff", linewidth=1.0)
+        ax.set_facecolor("#0d1f36")
+        ax.figure.patch.set_facecolor("#0d1f36")
+        ax.tick_params(axis="x", colors="#dbe7ff")
+        ax.tick_params(axis="y", colors="#dbe7ff")
+        ax.set_title("SHAP Waterfall", color="#dbe7ff")
+        ax.set_xlabel("Contribution", color="#dbe7ff")
+        if show:
+            plt.show()
+        return ax
+
+
+def build_shap_explanation(feature_vector: pd.DataFrame, target_prediction: float | None = None):
     """Build SHAP payload from the local mock explainer."""
     feature_names = list(feature_vector.columns)
     values = feature_vector.iloc[0].to_numpy(dtype=float)
@@ -481,10 +565,11 @@ def get_recommendation(risk_band: str) -> str:
 
 def initialize_model_and_explainer():
     """Initialize the local mock explainer once per session."""
-    if st.session_state.get("model_explainer") is not None:
+    if st.session_state.get("model_explainer") is not None and st.session_state.get("model") is not None:
         return
 
-    st.session_state["model_explainer"] = MockExplainer()
+    st.session_state["model"] = LendingModel()
+    st.session_state["model_explainer"] = MockShapExplainer(st.session_state["model"])
     st.session_state["model_id"] = DEFAULT_MODEL_ID
     st.session_state.pop("model_explainer_error", None)
 
@@ -590,12 +675,15 @@ with output_col:
             st.caption("Top reasons are explained using SHAP waterfall based on borrower input and model output.")
 
             try:
-                import shap
+                try:
+                    import shap as shap_module
+                except Exception:
+                    shap_module = MockShapModule()
                 import matplotlib.pyplot as plt
 
                 borrower_vector = get_borrower_feature_vector(age, income, remittance, land_area)
                 shap_payload = build_shap_explanation(borrower_vector, target_prediction=0.28)
-                shap_explanation = shap.Explanation(
+                shap_explanation = shap_module.Explanation(
                     values=shap_payload["values"],
                     base_values=shap_payload["base_value"],
                     data=shap_payload["current_values"],
@@ -606,7 +694,7 @@ with output_col:
                 shap_height = 4.2 if chart_height_main <= 230 else 6.0 if chart_height_main >= 320 else 4.8
                 fig, ax = plt.subplots(figsize=(9, shap_height))
                 fig.patch.set_facecolor("#0d1f36")
-                shap.waterfall_plot(shap_explanation, max_display=4, show=False)
+                shap_module.waterfall_plot(shap_explanation, max_display=4, show=False)
                 if audit_mode_enabled:
                     left_col, right_col = st.columns([2, 1], gap="large")
                     with left_col:
@@ -653,7 +741,8 @@ with output_col:
                             use_container_width=True,
                         )
                 plt.close(fig)
-            except Exception:
+            except Exception as exc:
+                st.session_state["model_explainer_error"] = str(exc)
                 explainer_error = st.session_state.get("model_explainer_error", "Unknown error")
                 st.warning(
                     f"SHAP waterfall unavailable. {explainer_error}"
@@ -714,4 +803,3 @@ with output_col:
     else:
         st.info("Enter borrower details and click 'Run Risk Assessment' to view the dashboard.")
     st.markdown('</div>', unsafe_allow_html=True)
-train_model.py
