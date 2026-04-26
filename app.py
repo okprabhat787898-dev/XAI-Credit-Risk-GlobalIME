@@ -178,7 +178,7 @@ def get_risk_theme(risk_band: str):
     return {"bg": "#ffe9e9", "accent": "#a32525"}
 
 
-def render_metric_cards(risk_percent: int, confidence: float, risk_band: str, gauge_height: int):
+def render_metric_cards(risk_percent: int, confidence: float, risk_band: str):
     theme = get_risk_theme(risk_band)
     c1, c2, c3 = st.columns(3, gap="medium")
     with c1:
@@ -202,19 +202,15 @@ def render_metric_cards(risk_percent: int, confidence: float, risk_band: str, ga
             unsafe_allow_html=True,
         )
     with c3:
-        band_col, gauge_col = st.columns([1.05, 1.15], gap="small")
-        with band_col:
-            st.markdown(
-                f"""
-                <div class="metric-card" style="background:{theme['bg']}; border-left:5px solid {theme['accent']};">
-                    <div class="metric-label">Risk Band</div>
-                    <div class="metric-value">{risk_band}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with gauge_col:
-            render_risk_gauge(risk_percent, chart_height=gauge_height)
+        st.markdown(
+            f"""
+            <div class="metric-card" style="background:{theme['bg']}; border-left:5px solid {theme['accent']};">
+                <div class="metric-label">Risk Band</div>
+                <div class="metric-value">{risk_band}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def build_shap_explanation(age: int, income: int, remittance: str, land_area: float):
@@ -258,64 +254,33 @@ def render_risk_gauge(risk_percent: int, chart_height: int = 185):
     try:
         import plotly.graph_objects as go
 
-        steps = 60
-        start_rgb = np.array([41, 171, 91])
-        end_rgb = np.array([219, 68, 55])
-        gradient_colors = []
-        for i in range(steps):
-            t = i / (steps - 1)
-            rgb = (1 - t) * start_rgb + t * end_rgb
-            gradient_colors.append(f"rgb({int(rgb[0])},{int(rgb[1])},{int(rgb[2])})")
-
-        theta = np.pi * (1 - risk_percent / 100)
-        needle_x = 0.5 + 0.36 * np.cos(theta)
-        needle_y = 0.5 + 0.36 * np.sin(theta)
-
-        fig = go.Figure()
-        fig.add_trace(
-            go.Pie(
-                values=[1] * steps + [steps],
-                marker=dict(colors=gradient_colors + ["rgba(0,0,0,0)"], line=dict(width=0)),
-                hole=0.70,
-                rotation=180,
-                direction="clockwise",
-                sort=False,
-                textinfo="none",
-                hoverinfo="skip",
-                showlegend=False,
+        fig = go.Figure(
+            go.Indicator(
+                mode="gauge+number",
+                value=risk_percent,
+                number={"suffix": "/100", "font": {"size": 34, "color": "#dbe7ff"}},
+                title={"text": "Risk Score Gauge", "font": {"size": 16, "color": "#dbe7ff"}},
+                gauge={
+                    "axis": {"range": [0, 100], "tickcolor": "#dbe7ff"},
+                    "bar": {"color": "#74b4ff", "thickness": 0.34},
+                    "steps": [
+                        {"range": [0, 35], "color": "#1f7a45"},
+                        {"range": [35, 65], "color": "#9a6b00"},
+                        {"range": [65, 100], "color": "#a32525"},
+                    ],
+                    "threshold": {
+                        "line": {"color": "#f8fafc", "width": 4},
+                        "thickness": 0.8,
+                        "value": risk_percent,
+                    },
+                    "bgcolor": "#0d1f36",
+                },
             )
         )
-
-        fig.add_shape(
-            type="line",
-            x0=0.5,
-            y0=0.5,
-            x1=needle_x,
-            y1=needle_y,
-            xref="paper",
-            yref="paper",
-            line=dict(color="#0d1f3b", width=3),
-        )
-        fig.add_shape(
-            type="circle",
-            x0=0.48,
-            y0=0.48,
-            x1=0.52,
-            y1=0.52,
-            xref="paper",
-            yref="paper",
-            fillcolor="#0d1f3b",
-            line=dict(color="#0d1f3b"),
-        )
-
-        fig.add_annotation(x=0.5, y=0.30, text=f"<b>{risk_percent}/100</b>", showarrow=False, font=dict(size=15, color="#0d1f3b"))
-        fig.add_annotation(x=0.09, y=0.46, text="0", showarrow=False, font=dict(size=10, color="#2f5c3f"))
-        fig.add_annotation(x=0.91, y=0.46, text="100", showarrow=False, font=dict(size=10, color="#8f2d2d"))
-
         fig.update_layout(
             height=chart_height,
-            margin=dict(l=0, r=0, t=8, b=0),
-            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=8, r=8, t=36, b=8),
+            paper_bgcolor="#0d1f36",
             font=dict(color="#dbe7ff"),
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -479,9 +444,13 @@ with output_col:
             st.markdown('<div class="dashboard-container">', unsafe_allow_html=True)
             st.markdown('<div class="premium-card">Decision Snapshot</div>', unsafe_allow_html=True)
             st.write("")
-            render_metric_cards(risk_percent, confidence, risk_band, gauge_height=gauge_height)
-            st.write("")
-            status_block(f"Decision Track: {status}")
+            metrics_col, gauge_col = st.columns([1.6, 1.0], gap="medium")
+            with metrics_col:
+                render_metric_cards(risk_percent, confidence, risk_band)
+                st.write("")
+                status_block(f"Decision Track: {status}")
+            with gauge_col:
+                render_risk_gauge(risk_percent, chart_height=gauge_height)
             st.markdown("</div>", unsafe_allow_html=True)
 
         if mode == "Customer (Plain Nepali)":
@@ -562,10 +531,12 @@ with output_col:
 
                 plt.style.use("dark_background")
                 shap_height = 4.2 if chart_height_main <= 230 else 6.0 if chart_height_main >= 320 else 4.8
+                xai_col_1, xai_col_2 = st.columns([1.45, 0.95], gap="large")
                 fig, ax = plt.subplots(figsize=(9, shap_height))
                 fig.patch.set_facecolor("#0d1f36")
                 shap.plots.waterfall(shap_explanation, max_display=4, show=False)
-                st.pyplot(fig, use_container_width=True)
+                with xai_col_1:
+                    st.pyplot(fig, use_container_width=True)
                 plt.close(fig)
 
                 contrib_df = pd.DataFrame(
@@ -574,10 +545,12 @@ with output_col:
                         "SHAP Contribution": shap_payload["values"],
                     }
                 ).sort_values("SHAP Contribution", key=lambda s: s.abs(), ascending=False)
-                st.dataframe(
-                    contrib_df.style.format({"SHAP Contribution": "{:+.3f}"}),
-                    use_container_width=True,
-                )
+                with xai_col_2:
+                    st.markdown("#### Feature Push Table")
+                    st.dataframe(
+                        contrib_df.style.format({"SHAP Contribution": "{:+.3f}"}),
+                        use_container_width=True,
+                    )
             except Exception:
                 st.warning(
                     "SHAP diagnostics unavailable. Install dependencies with: pip install shap matplotlib"
