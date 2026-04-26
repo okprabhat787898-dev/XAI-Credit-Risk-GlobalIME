@@ -331,10 +331,20 @@ with st.sidebar:
         st.success("CIB Report Retrieved: Score 742 (Good)")
     st.divider()
     st.subheader("Identity Verification")
-    if st.button("🆔 Start e-KYC Verification", use_container_width=True):
-        with st.spinner("Verifying Citizensip/PAN with Government Portal..."):
-            time.sleep(2)
+    identity_document = st.file_uploader(
+        "Upload Citizenship/PAN Card",
+        type=["pdf", "jpg", "jpeg"],
+    )
+    if st.button("🆔 Start e-KYC Verification", use_container_width=True, disabled=identity_document is None):
+        with st.spinner("Reading document with OCR..."):
+            time.sleep(1)
+        with st.spinner("Validating with Government Database..."):
+            time.sleep(1)
+        with st.spinner("Performing Face Match..."):
+            time.sleep(1)
         st.session_state.ekyc_verified = True
+    if identity_document is None:
+        st.warning("कृपया प्रमाणित गर्न दस्तावेज अपलोड गर्नुहोस्")
     if st.session_state.ekyc_verified:
         st.success("e-KYC Verified: Identity Confirmed")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -440,7 +450,7 @@ with bottom_col:
         if st.session_state.ekyc_verified:
             st.success("✅ तपाईंको पहिचान (e-KYC) सफलतापूर्वक प्रमाणित भएको छ।")
         else:
-            st.warning("कृपया आफ्नो पहिचान प्रमाणित गर्न e-KYC प्रक्रिया पूरा गर्नुहोस्।")
+            st.info("तपाईंको आवेदन प्रक्रिया अगाडि बढाउन कृपया बायाँ छेउमा रहेको Identity Verification मा आफ्नो कागजात अपलोड गरी प्रमाणीकरण गर्नुहोस्।")
         if assessment["label"] in {"MEDIUM RISK", "HIGH RISK"}:
             st.markdown("**What-If सुझाव**")
             st.info(
@@ -465,5 +475,8 @@ else:
 
 if not st.session_state.cib_verified:
     st.info("कृपया CIB रेकर्ड जाँच गर्न माथिको बटन थिच्नुहोस्।")
+
+if not st.session_state.ekyc_verified:
+    st.info("कृपया आफ्नो पहिचान प्रमाणित गर्न नागरिकता वा प्यान कार्ड अपलोड गर्नुहोस्।")
 
 st.markdown("</div>", unsafe_allow_html=True)
