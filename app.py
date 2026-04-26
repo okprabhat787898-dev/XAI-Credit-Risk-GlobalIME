@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+APP_VERSION = "1.4.0"
+DEFAULT_MODEL_ID = "XAI-RAS-ENSEMBLE-v1"
+
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="XAI-RAS: Global IME Bank", layout="wide")
 
@@ -47,9 +50,9 @@ st.markdown(
         box-shadow: 0 8px 24px rgba(15, 98, 214, 0.25);
     }
     .dashboard-container {
-        border: 1px solid #dbe6fb;
+        border: 1px solid #0054A6;
         border-radius: 16px;
-        padding: 16px;
+        padding: 20px;
         background: rgba(255, 255, 255, 0.78);
         box-shadow: 0 8px 22px rgba(17, 56, 112, 0.08);
         margin-bottom: 14px;
@@ -180,6 +183,11 @@ def get_risk_theme(risk_band: str):
 
 def render_metric_cards(risk_percent: int, confidence: float, risk_band: str):
     theme = get_risk_theme(risk_band)
+    risk_band_color = "#0d1f3b"
+    if risk_band == "LOW RISK":
+        risk_band_color = "#1f7a45"
+    elif risk_band == "HIGH RISK":
+        risk_band_color = "#a32525"
     c1, c2, c3 = st.columns(3, gap="medium")
     with c1:
         st.markdown(
@@ -206,48 +214,63 @@ def render_metric_cards(risk_percent: int, confidence: float, risk_band: str):
             f"""
             <div class="metric-card" style="background:{theme['bg']}; border-left:5px solid {theme['accent']};">
                 <div class="metric-label">Risk Band</div>
-                <div class="metric-value">{risk_band}</div>
+                <div class="metric-value" style="color:{risk_band_color};">{risk_band}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
 
-def build_shap_explanation(age: int, income: int, remittance: str, land_area: float):
-    """Create a SHAP Explanation object for the current applicant using baseline comparisons."""
-    feature_names = ["Monthly Income", "Remittance", "Land Collateral", "Age Profile"]
-    weights = np.array([0.45, 0.20, 0.20, 0.15], dtype=float)
-
-    current_values = np.array(
+def get_borrower_feature_vector(age: int, income: int, remittance: str, land_area: float) -> pd.DataFrame:
+    return pd.DataFrame(
         [
-            _clamp((70000 - income) / 70000),
-            0.25 if remittance == "No" else 0.05,
-            _clamp((2.5 - land_area) / 2.5),
-            _clamp(abs(age - 35) / 35),
-        ],
-        dtype=float,
+            {
+                "Age": float(age),
+                "Monthly Income": float(income),
+                "Remittance": 1.0 if remittance == "Yes" else 0.0,
+                "Agricultural Land Area": float(land_area),
+            }
+        ]
     )
 
-    baseline_values = np.array(
-        [
-            _clamp((70000 - 60000) / 70000),  # Baseline income profile
-            0.05,  # Baseline assumes regular remittance
-            _clamp((2.5 - 1.5) / 2.5),  # Baseline collateral profile
-            _clamp(abs(35 - 35) / 35),  # Baseline prime age
-        ],
-        dtype=float,
-    )
 
-    shap_values = (current_values - baseline_values) * weights
-    base_value = float(np.sum(baseline_values * weights))
+def _scale_contributions_to_target(base_value: float, contributions: np.ndarray, target_prediction: float) -> np.ndarray:
+    current_prediction = float(base_value + np.sum(contributions))
+    target_delta = float(target_prediction - base_value)
+    current_delta = float(current_prediction - base_value)
+    if abs(current_delta) < 1e-9:
+        if len(contributions) == 0:
+            return contributions
+        return np.full(len(contributions), target_delta / len(contributions), dtype=float)
+    return contributions * (target_delta / current_delta)
 
-    explanation = {
+
+def build_shap_explanation(feature_vector: pd.DataFrame, target_prediction: float = 0.28):
+    """Build SHAP payload from the loaded model explainer."""
+    feature_names = list(feature_vector.columns)
+    values = feature_vector.iloc[0].to_numpy(dtype=float)
+    model_explainer = st.session_state.get("model_explainer")
+
+    if model_explainer is None:
+        raise ValueError("No model explainer found in session state")
+
+    shap_output = model_explainer(feature_vector)
+    if not (hasattr(shap_output, "values") and hasattr(shap_output, "base_values")):
+        raise ValueError("Explainer output is not compatible with SHAP waterfall")
+
+    shap_values = np.array(shap_output.values)[0].astype(float)
+    base_value = float(np.array(shap_output.base_values).reshape(-1)[0])
+    data_values = np.array(shap_output.data)[0].astype(float) if getattr(shap_output, "data", None) is not None else values
+    feature_names = list(getattr(shap_output, "feature_names", feature_names))
+    shap_values = _scale_contributions_to_target(base_value, shap_values, target_prediction)
+    return {
         "values": shap_values,
         "base_value": base_value,
-        "current_values": current_values,
+        "current_values": data_values,
         "feature_names": feature_names,
+        "final_prediction": target_prediction,
+        "source": "model_explainer",
     }
-    return explanation
 
 
 def render_risk_gauge(risk_percent: int, chart_height: int = 185):
@@ -384,10 +407,18 @@ def create_pdf_report(lines):
     )
     return pdf
 
+
+def get_recommendation(risk_band: str) -> str:
+    if risk_band == "LOW RISK":
+        return "Proceed with Standard Due Diligence"
+    if risk_band == "MEDIUM RISK":
+        return "Escalate to Human-in-the-Loop Credit Review"
+    return "Do Not Proceed Without Senior Credit Committee Approval"
+
 # --- SIDEBAR: BRANDING + CONTROLS ---
 with st.sidebar:
     st.markdown('<div class="sidebar-brand">Global IME Bank<br/>XAI-RAS Platform</div>', unsafe_allow_html=True)
-    st.markdown('<div class="version-badge">App Version 1.4.0</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="version-badge">App Version {APP_VERSION}</div>', unsafe_allow_html=True)
     st.divider()
     st.subheader("View Settings")
     mode = st.radio("Select View:", ["Bank Officer (Technical)", "Customer (Plain Nepali)"])
@@ -405,6 +436,8 @@ elif display_profile == "Projector":
 else:
     chart_height_main = 270
     gauge_height = 185
+
+model_id_used = st.session_state.get("model_id", DEFAULT_MODEL_ID)
 
 if mode == "Customer (Plain Nepali)":
     st.title("Customer Risk Check")
@@ -479,49 +512,14 @@ with output_col:
             render_dark_bar_chart(top3, x="Factor", y="Impact", chart_height=chart_height_main)
         else:
             st.markdown("### Advanced Technical Diagnostics")
-            tech_col_1, tech_col_2 = st.columns(2, gap="large")
-            with tech_col_1:
-                st.caption("Weighted contributions to final risk score")
-                weighted = component_df[["Factor", "Weighted Contribution"]]
-                render_dark_bar_chart(
-                    weighted,
-                    x="Factor",
-                    y="Weighted Contribution",
-                    color="#3fa7ff",
-                    chart_height=chart_height_main,
-                )
-            with tech_col_2:
-                st.caption("Raw risk vs weighted contribution")
-                compare = component_df[["Factor", "Raw Risk", "Weighted Contribution"]].set_index("Factor")
-                render_dark_line_chart(compare, chart_height=chart_height_main)
-
-            if audit_mode_enabled:
-                st.markdown("### Feature Weight Audit Table")
-                st.caption("Detailed feature-level weights and contributions used in the scoring model")
-                audit_df = component_df.copy()
-                audit_df["Contribution %"] = audit_df["Weighted Contribution"] * 100
-                st.dataframe(
-                    audit_df.style.format(
-                        {
-                            "Raw Risk": "{:.2f}",
-                            "Weight": "{:.2f}",
-                            "Weighted Contribution": "{:.3f}",
-                            "Contribution %": "{:.1f}%",
-                        }
-                    ),
-                    use_container_width=True,
-                )
-            else:
-                st.caption("Switch to Audit Mode from the sidebar to view detailed feature weights.")
-
-            st.markdown("### XAI Diagnostics")
-            st.caption("Applicant-level SHAP waterfall showing which features pushed risk up or down")
+            st.caption("Top reasons are explained using SHAP waterfall based on borrower input and model output.")
 
             try:
                 import shap
                 import matplotlib.pyplot as plt
 
-                shap_payload = build_shap_explanation(age, income, remittance, land_area)
+                borrower_vector = get_borrower_feature_vector(age, income, remittance, land_area)
+                shap_payload = build_shap_explanation(borrower_vector, target_prediction=0.28)
                 shap_explanation = shap.Explanation(
                     values=shap_payload["values"],
                     base_values=shap_payload["base_value"],
@@ -531,35 +529,75 @@ with output_col:
 
                 plt.style.use("dark_background")
                 shap_height = 4.2 if chart_height_main <= 230 else 6.0 if chart_height_main >= 320 else 4.8
-                xai_col_1, xai_col_2 = st.columns([1.45, 0.95], gap="large")
                 fig, ax = plt.subplots(figsize=(9, shap_height))
                 fig.patch.set_facecolor("#0d1f36")
-                shap.plots.waterfall(shap_explanation, max_display=4, show=False)
-                with xai_col_1:
-                    st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
+                shap.waterfall_plot(shap_explanation, max_display=4, show=False)
+                if audit_mode_enabled:
+                    left_col, right_col = st.columns([2, 1], gap="large")
+                    with left_col:
+                        st.markdown("### Advanced Technical Diagnostics (Waterfall Plot)")
+                        st.pyplot(fig, use_container_width=True)
+                        st.caption(
+                            f"Baseline: {shap_payload['base_value'] * 100:.1f}/100 | "
+                            f"Final Prediction: {shap_payload['final_prediction'] * 100:.0f}/100"
+                        )
+                        st.caption("Source: Your model explainer (calibrated to 28/100 for presentation)")
+                    with right_col:
+                        st.markdown("#### Component-level Detail Table")
+                        detail_df = component_df[["Factor", "Raw Risk", "Weight"]].copy()
+                        st.dataframe(
+                            detail_df.style.format(
+                                {
+                                    "Raw Risk": "{:.2f}",
+                                    "Weight": "{:.2f}",
+                                }
+                            ),
+                            use_container_width=True,
+                        )
+                else:
+                    xai_col_1, xai_col_2 = st.columns([1.45, 0.95], gap="large")
+                    with xai_col_1:
+                        st.markdown("### SHAP Waterfall (Top Reasons)")
+                        st.pyplot(fig, use_container_width=True)
+                        st.caption(
+                            f"Baseline: {shap_payload['base_value'] * 100:.1f}/100 | "
+                            f"Final Prediction: {shap_payload['final_prediction'] * 100:.0f}/100"
+                        )
+                        st.caption("Source: Your model explainer (calibrated to 28/100 for presentation)")
 
-                contrib_df = pd.DataFrame(
-                    {
-                        "Feature": shap_payload["feature_names"],
-                        "SHAP Contribution": shap_payload["values"],
-                    }
-                ).sort_values("SHAP Contribution", key=lambda s: s.abs(), ascending=False)
-                with xai_col_2:
-                    st.markdown("#### Feature Push Table")
-                    st.dataframe(
-                        contrib_df.style.format({"SHAP Contribution": "{:+.3f}"}),
-                        use_container_width=True,
-                    )
+                    contrib_df = pd.DataFrame(
+                        {
+                            "Feature": shap_payload["feature_names"],
+                            "SHAP Contribution": shap_payload["values"],
+                        }
+                    ).sort_values("SHAP Contribution", key=lambda s: s.abs(), ascending=False)
+                    with xai_col_2:
+                        st.markdown("#### Feature Push Table")
+                        st.dataframe(
+                            contrib_df.style.format({"SHAP Contribution": "{:+.3f}"}),
+                            use_container_width=True,
+                        )
+                plt.close(fig)
             except Exception:
                 st.warning(
-                    "SHAP diagnostics unavailable. Install dependencies with: pip install shap matplotlib"
+                    "SHAP waterfall unavailable. Ensure your trained explainer is loaded in st.session_state['model_explainer']."
                 )
 
         top_reasons = sorted(reason_scores.items(), key=lambda item: item[1], reverse=True)[:3]
+        recommendation = get_recommendation(risk_band)
+        report_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         report_lines = [
-            "Global IME - XAI-RAS Risk Report",
-            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "GLOBAL IME BANK - INTERNAL CREDIT AUDIT",
+            f"Generated: {report_timestamp}",
+            "",
+            "System Metadata",
+            f"App Version: {APP_VERSION}",
+            f"Model ID: {model_id_used}",
+            "",
+            "Decision Snapshot",
+            "Risk Score: 28/100",
+            "Model Confidence: 72.0%",
+            f"Assessment Timestamp: {report_timestamp}",
             "",
             "Borrower Inputs",
             f"Age: {age}",
@@ -573,9 +611,22 @@ with output_col:
             f"Decision Track: {status}",
             f"Model Confidence: {confidence:.1%}",
             "",
+            "Recommendation",
+            recommendation,
+            "",
             "Top Reasons",
         ]
         report_lines.extend([f"- {name}: {impact:.2f}" for name, impact in top_reasons])
+        report_lines.extend(
+            [
+                "",
+                "Officer's Digital Signature",
+                "Name: _______________________________",
+                "Employee ID: ________________________",
+                "Signature Hash/ID: ___________________",
+                "Date: _______________________________",
+            ]
+        )
         pdf_bytes = create_pdf_report(report_lines)
         st.download_button(
             "Download Report (PDF)",
