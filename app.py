@@ -1,9 +1,36 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="XAI-RAS: Global IME Bank", layout="wide")
+
+
+def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(value, maximum))
+
+
+def calculate_risk(age: int, income: int, remittance: str, land_area: float):
+    """Simple, explainable score for demo purposes."""
+    income_risk = _clamp((70000 - income) / 70000)
+    age_risk = _clamp(abs(age - 35) / 35)
+    land_risk = _clamp((2.5 - land_area) / 2.5)
+    remittance_risk = 0.25 if remittance == "No" else 0.05
+
+    reason_scores = {
+        "Low Monthly Income": income_risk,
+        "No Remittance Inflow": remittance_risk,
+        "Limited Land Collateral": land_risk,
+        "Age Profile": age_risk,
+    }
+
+    # Weighted sum gives a normalized risk score from 0 to 1.
+    risk_score = (
+        (income_risk * 0.45)
+        + (remittance_risk * 0.20)
+        + (land_risk * 0.20)
+        + (age_risk * 0.15)
+    )
+    return _clamp(risk_score), reason_scores
 
 # --- CUSTOMER/OFFICER TOGGLE (From your paper's Dual-Audience requirement) ---
 st.sidebar.title("View Mode")
@@ -16,44 +43,62 @@ else:
     st.title("XAI-RAS: Smart Credit Approval Dashboard")
     st.write("Autonomous Credit & Lending Orchestrator | Global IME Bank Hackathon 2026")
 
-# --- INPUT PANEL (Figure D1 in your paper) ---
-st.header("Borrower Input Panel")
-col1, col2 = st.columns(2)
+# --- DASHBOARD LAYOUT ---
+input_col, output_col = st.columns([1.05, 1.45], gap="large")
 
-with col1:
+with input_col:
+    st.subheader("Borrower Input Panel")
     age = st.number_input("Age", min_value=18, max_value=80, value=30)
-    income = st.number_input("Monthly Income (NPR)", min_value=0, value=50000)
-    
-with col2:
+    income = st.number_input("Monthly Income (NPR)", min_value=0, value=50000, step=1000)
     remittance = st.selectbox("Receives Remittance?", ["Yes", "No"])
-    land_area = st.number_input("Agricultural Land Area (Ropani)", min_value=0.0, value=1.0)
+    land_area = st.number_input("Agricultural Land Area (Ropani)", min_value=0.0, value=1.0, step=0.1)
+    run_assessment = st.button("Run Risk Assessment", use_container_width=True)
 
-# --- PREDICTION LOGIC (Placeholder for your Ensemble Model) ---
-if st.button("Run Risk Assessment"):
-    st.divider()
-    
-    # Mock calculation for the hackathon demo
-    risk_score = np.random.random() 
-    
-    # --- RESULT PANEL (Figure D2 in your paper) ---
-    st.header("Risk Prediction Result")
-    
-    if risk_score < 0.3:
-        st.success(f"LOW RISK (Confidence: {1-risk_score:.2%})")
+with output_col:
+    st.subheader("Decision Dashboard")
+    st.caption("Professional summary of model output, confidence, and explainability drivers")
+
+    if run_assessment:
+        risk_score, reason_scores = calculate_risk(age, income, remittance, land_area)
+        risk_percent = int(round(risk_score * 100))
+        confidence = 1 - risk_score
+
+        if risk_score < 0.35:
+            risk_band = "LOW RISK"
+            status = "Approved Path"
+            status_block = st.success
+        elif risk_score < 0.65:
+            risk_band = "MEDIUM RISK"
+            status = "Manual Review"
+            status_block = st.warning
+        else:
+            risk_band = "HIGH RISK"
+            status = "Likely Reject"
+            status_block = st.error
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Risk Score", f"{risk_percent}/100")
+        m2.metric("Risk Band", risk_band)
+        m3.metric("Model Confidence", f"{confidence:.1%}")
+
+        status_block(f"Decision Track: {status}")
+
         if mode == "Customer (Plain Nepali)":
-            st.write("बधाई छ! तपाईंको ऋण आवेदन स्वीकृत हुने उच्च सम्भावना छ।")
-    elif risk_score < 0.7:
-        st.warning(f"MEDIUM RISK (Confidence: {1-risk_score:.2%})")
-        st.write("Requires Human-in-the-Loop (HITL) Review.")
+            if risk_band == "LOW RISK":
+                st.info("बधाई छ! तपाईंको ऋण आवेदन स्वीकृत हुने उच्च सम्भावना छ।")
+            elif risk_band == "MEDIUM RISK":
+                st.info("तपाईंको आवेदन थप समीक्षा (HITL) का लागि पठाइएको छ।")
+            else:
+                st.info("माफ गर्नुहोला, तपाईंको आवेदन अहिलेको लागि अस्वीकृत भएको छ।")
+
+        st.markdown("### Top 3 Reasons For Decision")
+        top3 = (
+            pd.DataFrame(
+                sorted(reason_scores.items(), key=lambda item: item[1], reverse=True)[:3],
+                columns=["Reason", "Impact"],
+            )
+            .set_index("Reason")
+        )
+        st.bar_chart(top3)
     else:
-        st.error(f"HIGH RISK (Confidence: {1-risk_score:.2%})")
-        if mode == "Customer (Plain Nepali)":
-            st.write("माफ गर्नुहोला, तपाईंको आवेदन अहिलेको लागि अस्वीकृत भएको छ।")
-
-    # --- SHAP EXPLANATION PANEL (Figure D3 in your paper) ---
-        st.header("Explainability (XAI) Drivers")
-        st.write("The following factors influenced this decision:")
-    
-    # Simple visual representation of SHAP
-        factors = {"Income": 0.4, "Remittance": 0.3, "Age": 0.1, "Land Area": 0.2}
-        st.bar_chart(pd.DataFrame(factors, index=["Impact"]))
+        st.info("Enter borrower details and click 'Run Risk Assessment' to view the dashboard.")
