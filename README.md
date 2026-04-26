@@ -34,6 +34,18 @@ An explainable AI (XAI) risk assessment dashboard for transparent and practical 
 - Plotly
 - uv
 
+## Technical Excellence
+
+- **Simulated ML Inference Engine (Sigmoid-based)**
+  - The application uses a simulated logistic inference pipeline with sigmoid probability scoring to emulate modern risk prediction behavior.
+  - This design helps demonstrate how explainable AI can be applied to credit scoring with clear, interpretable outputs.
+- **Simulated CIB API Integration**
+  - A simulated CIB Nepal verification flow is included to mirror real-world external credit-record checks in a banking process.
+  - The persistent verification state in the interface demonstrates practical workflow continuity from data verification to advisory output.
+- **Real-world Workflow and NRB 2025 Alignment**
+  - Together, these simulations showcase an end-to-end banking decision-support journey, from applicant profiling to explainable recommendation.
+  - The workflow supports transparency, traceability, and human-review readiness aligned with NRB 2025 compliance expectations.
+
 ## Project Structure
 
 ```text

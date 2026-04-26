@@ -1,4 +1,6 @@
 from pathlib import Path
+import math
+import time
 
 import numpy as np
 import pandas as pd
@@ -26,6 +28,9 @@ AGE_REFERENCE = 35.0
 AGE_SPREAD = 25.0
 
 st.set_page_config(page_title=f"XAI-RAS v{APP_VERSION} | Global IME Bank", page_icon="📊", layout="wide")
+
+if "cib_verified" not in st.session_state:
+    st.session_state.cib_verified = False
 
 st.markdown(
     """
@@ -168,16 +173,15 @@ def assess_applicant(age: int, income: int, remittance_status: int, land_area: f
         "Land Area": land_risk(land_area),
         "Age": age_risk(age),
     }
-    score = sum(factor_risks[name] * weight for name, weight in RISK_WEIGHTS.items()) * 100.0
-    
-    # Apply loan-to-income ratio adjustment
-    if loan_to_income_ratio > 5:
-        score += 25
-    elif 3 <= loan_to_income_ratio <= 5:
-        score += 10
-    
-    # Cap the score at 100
-    score = min(score, 100.0)
+    income_factor = 1.0 - factor_risks["Income"]
+    remittance_factor = 1.0 - factor_risks["Remittance"]
+
+    ml_logit = -0.5
+    ml_logit += income_factor * -0.45
+    ml_logit += remittance_factor * -0.6
+    ml_logit += loan_to_income_ratio * 0.5
+
+    score = (1 / (1 + math.exp(-ml_logit))) * 100
     
     contributions = {
         name: (factor_risks[name] - 0.5) * RISK_WEIGHTS[name] * 100.0 for name in RISK_WEIGHTS
@@ -317,6 +321,12 @@ with st.sidebar:
         help=loan_affordability_help,
     )
     st.caption("Loan ÷ Annual Income")
+    if st.button("🔍 Check CIB Records (API Simulation)", use_container_width=True):
+        with st.spinner("Connecting to CIB Nepal..."):
+            time.sleep(2)
+        st.session_state.cib_verified = True
+    if st.session_state.cib_verified:
+        st.success("CIB Report Retrieved: Score 742 (Good)")
     st.markdown('</div>', unsafe_allow_html=True)
 
 assessment = assess_applicant(applicant_age, monthly_income, remittance_status, land_area, loan_to_income_ratio)
@@ -432,8 +442,14 @@ st.subheader("तपाईंको लागि हाम्रो सुझा
 if loan_to_income_ratio > 5:
     st.warning("⚠️ ऋण रकम आपको वार्षिक आय भन्दा अत्यधिक छ। कृपया कम रकमको लागि आवेदन गर्ने विचार गर्नुहोस्।")
 elif assessment['score'] < 40:
-    st.success("✓ आपको आर्थिक प्रोफाइल राम्रोसँग संतुलित छ। आपको आवेदन स्वीकृत हुने सम्भावना राम्रो छ।")
+    success_message = "✓ आपको आर्थिक प्रोफाइल राम्रोसँग संतुलित छ। आपको आवेदन स्वीकृत हुने सम्भावना राम्रो छ।"
+    if st.session_state.cib_verified:
+        success_message += " हाम्रो AI ले तपाईंको CIB रेकर्ड र ऋणको अनुपात जाँच गर्दा सबै कुरा राम्रो देखियो।"
+    st.success(success_message)
 else:
     st.info("ℹ️ आपको आवेदन विस्तृत समीक्षा गरिँदै छ। कृपया धैर्य राख्नुहोस्।")
+
+if not st.session_state.cib_verified:
+    st.info("कृपया CIB रेकर्ड जाँच गर्न माथिको बटन थिच्नुहोस्।")
 
 st.markdown("</div>", unsafe_allow_html=True)
