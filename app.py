@@ -2,9 +2,12 @@ from pathlib import Path
 import math
 import time
 
+import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+model = joblib.load('model.joblib')
 
 APP_VERSION = "1.4.0"
 RED = "#C5161D"
@@ -168,22 +171,22 @@ def age_risk(age: int) -> float:
     return clamp(abs(float(age) - AGE_REFERENCE) / AGE_SPREAD)
 
 
-def assess_applicant(age: int, income: int, remittance_status: int, land_area: float, loan_to_income_ratio: float = 0.0) -> dict:
+def assess_applicant(
+    age: int,
+    monthly_income: int,
+    loan_amount: float,
+    remittance_status: int,
+    land_area: float,
+    loan_to_income_ratio: float = 0.0,
+) -> dict:
     factor_risks = {
-        "Income": income_risk(income),
+        "Income": income_risk(monthly_income),
         "Remittance": remittance_risk(remittance_status),
         "Land Area": land_risk(land_area),
         "Age": age_risk(age),
     }
-    income_factor = 1.0 - factor_risks["Income"]
-    remittance_factor = 1.0 - factor_risks["Remittance"]
-
-    ml_logit = -0.5
-    ml_logit += income_factor * -0.45
-    ml_logit += remittance_factor * -0.6
-    ml_logit += loan_to_income_ratio * 0.5
-
-    score = (1 / (1 + math.exp(-ml_logit))) * 100
+    features = np.array([[monthly_income, loan_amount, age]])
+    risk_score = model.predict_proba(features)[0][1] * 100
     
     contributions = {
         name: (factor_risks[name] - 0.5) * RISK_WEIGHTS[name] * 100.0 for name in RISK_WEIGHTS
@@ -203,10 +206,10 @@ def assess_applicant(age: int, income: int, remittance_status: int, land_area: f
     factor_table["Direction"] = np.where(factor_table["Contribution"] >= 0, "Increases risk", "Reduces risk")
     factor_table = factor_table.sort_values("Contribution", key=lambda series: series.abs(), ascending=False)
 
-    if score < 35:
+    if risk_score < 35:
         band = "LOW"
         label = "LOW RISK"
-    elif score < 65:
+    elif risk_score < 65:
         band = "MEDIUM"
         label = "MEDIUM RISK"
     else:
@@ -214,13 +217,13 @@ def assess_applicant(age: int, income: int, remittance_status: int, land_area: f
         label = "HIGH RISK"
 
     return {
-        "score": round(score, 1),
+        "score": round(risk_score, 1),
         "band": band,
         "label": label,
         "factor_risks": factor_risks,
         "contributions": contributions,
         "factor_table": factor_table,
-        "confidence": round(100.0 - score, 1),
+        "confidence": round(100.0 - risk_score, 1),
     }
 
 
@@ -362,19 +365,19 @@ with st.sidebar:
         st.success("e-KYC Verified: Identity Confirmed")
     st.markdown('</div>', unsafe_allow_html=True)
 
-assessment = assess_applicant(applicant_age, monthly_income, remittance_status, land_area, loan_to_income_ratio)
+assessment = assess_applicant(applicant_age, monthly_income, loan_amount, remittance_status, land_area, loan_to_income_ratio)
 
 st.markdown(
     f'''
     <div class="hero-card">
         <div class="brand-strip">Global IME Bank Banking Dashboard</div>
         <h1 style="margin:0.6rem 0 0.35rem 0;">XAI-RAS v{APP_VERSION}</h1>
-        <div class="small-note">Weighted risk score: Income 45%, Remittance 20%, Land Area 20%, Age 15%.</div>
         <div class="summary-badge">Score 0 = perfect | Score 100 = high risk</div>
     </div>
     ''',
     unsafe_allow_html=True,
 )
+st.caption("ML Engine: Random Forest Classifier | NRB AI Guidelines 2025 Compliant")
 
 top_col, bottom_col = st.columns([1.1, 1.0], gap="large")
 
@@ -426,7 +429,6 @@ with bottom_col:
     if view_mode == "Bank Officer View":
         st.subheader("Bank Officer View")
         st.caption("Technical metrics, explainability, and audit controls for credit officers.")
-        audit_report_text = generate_audit_report(monthly_income, loan_amount)
         st.dataframe(
             assessment["factor_table"][ ["Factor", "Risk Signal", "Weight", "Contribution", "Direction"] ].style.format(
                 {"Risk Signal": "{:.2f}", "Weight": "{:.2f}", "Contribution": "{:+.1f}"}
@@ -446,10 +448,19 @@ with bottom_col:
             """,
             unsafe_allow_html=True,
         )
+        risk_score = assessment["score"]
+        audit_log_text = (
+            "Model Type: Random Forest Classifier\n"
+            f"Income: {monthly_income}\n"
+            f"Loan: {loan_amount}\n"
+            f"Age: {applicant_age}\n"
+            f"Final Risk Score: {risk_score:.1f}\n"
+        )
+        st.caption("Download current model inputs and final risk_score as a plain-text audit log.")
         st.download_button(
-            "Download Audit Report",
-            data=audit_report_text,
-            file_name="Global_IME_Audit_Report.txt",
+            "Download Audit Log",
+            data=audit_log_text,
+            file_name="GlobalIME_Audit_Log.txt",
             mime="text/plain",
             use_container_width=True,
         )
