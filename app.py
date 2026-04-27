@@ -12,6 +12,12 @@ if not model_path.exists():
     model_path = Path(__file__).resolve().parent / "model.joblib"
 model = joblib.load(model_path)
 
+MODEL_FEATURE_NAMES = ("Income", "Loan Amount", "Age")
+MODEL_BASELINE_VALUES = np.array([80000.0, 500000.0, 35.0], dtype=float)
+MODEL_FEATURE_IMPORTANCES = np.array(getattr(model, "feature_importances_", np.full(3, 1.0 / 3.0)), dtype=float)
+if MODEL_FEATURE_IMPORTANCES.sum() > 0:
+    MODEL_FEATURE_IMPORTANCES = MODEL_FEATURE_IMPORTANCES / MODEL_FEATURE_IMPORTANCES.sum()
+
 APP_VERSION = "1.4.0"
 RED = "#C5161D"
 BLUE = "#004189"
@@ -20,13 +26,6 @@ TEXT = "#10233f"
 MUTED = "#50627f"
 CARD = "#ffffff"
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
-
-RISK_WEIGHTS = {
-    "Income": 0.45,
-    "Remittance": 0.20,
-    "Land Area": 0.20,
-    "Age": 0.15,
-}
 
 INCOME_REFERENCE = 80000.0
 LAND_REFERENCE = 5.0
@@ -154,24 +153,55 @@ st.markdown(
 )
 
 
-def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
-    return max(minimum, min(float(value), maximum))
+def predict_risk_score(monthly_income: int, loan_amount: float, age: int) -> float:
+    features = np.array([[monthly_income, loan_amount, age]], dtype=float)
+    return float(model.predict_proba(features)[0][1] * 100)
 
 
-def income_risk(income: float) -> float:
-    return clamp((INCOME_REFERENCE - float(income)) / INCOME_REFERENCE)
+def build_model_contributions(monthly_income: int, loan_amount: float, age: int) -> tuple[dict[str, float], pd.DataFrame, float]:
+    current_values = np.array([monthly_income, loan_amount, age], dtype=float)
+    baseline_score = predict_risk_score(*MODEL_BASELINE_VALUES)
+    current_score = predict_risk_score(monthly_income, loan_amount, age)
 
+    local_effects = []
+    for index, _ in enumerate(MODEL_FEATURE_NAMES):
+        sample_values = MODEL_BASELINE_VALUES.copy()
+        sample_values[index] = current_values[index]
+        local_effects.append(predict_risk_score(*sample_values) - baseline_score)
 
-def remittance_risk(remittance_status: int) -> float:
-    return 0.0 if int(remittance_status) == 1 else 1.0
+    local_effects_array = np.array(local_effects, dtype=float)
+    total_local_effect = float(local_effects_array.sum())
+    delta_score = current_score - baseline_score
+    if abs(total_local_effect) > 1e-9:
+        contribution_values = local_effects_array * (delta_score / total_local_effect)
+    else:
+        contribution_values = MODEL_FEATURE_IMPORTANCES * delta_score
 
+    contributions = {
+        feature_name: float(contribution)
+        for feature_name, contribution in zip(MODEL_FEATURE_NAMES, contribution_values)
+    }
 
-def land_risk(land_area: float) -> float:
-    return clamp((LAND_REFERENCE - float(land_area)) / LAND_REFERENCE)
+    contribution_table = pd.DataFrame(
+        [
+            {
+                "Feature": feature_name,
+                "Current Value": current_values[index],
+                "Baseline Value": MODEL_BASELINE_VALUES[index],
+                "Model Importance": MODEL_FEATURE_IMPORTANCES[index],
+                "Contribution": contributions[feature_name],
+            }
+            for index, feature_name in enumerate(MODEL_FEATURE_NAMES)
+        ]
+    )
+    contribution_table["Direction"] = np.where(
+        contribution_table["Contribution"] >= 0,
+        "Increases risk",
+        "Reduces risk",
+    )
+    contribution_table = contribution_table.sort_values("Contribution", key=lambda series: series.abs(), ascending=False)
 
-
-def age_risk(age: int) -> float:
-    return clamp(abs(float(age) - AGE_REFERENCE) / AGE_SPREAD)
+    return contributions, contribution_table, current_score
 
 
 def assess_applicant(
@@ -182,32 +212,7 @@ def assess_applicant(
     land_area: float,
     loan_to_income_ratio: float = 0.0,
 ) -> dict:
-    factor_risks = {
-        "Income": income_risk(monthly_income),
-        "Remittance": remittance_risk(remittance_status),
-        "Land Area": land_risk(land_area),
-        "Age": age_risk(age),
-    }
-    features = np.array([[monthly_income, loan_amount, age]])
-    risk_score = model.predict_proba(features)[0][1] * 100
-    
-    contributions = {
-        name: (factor_risks[name] - 0.5) * RISK_WEIGHTS[name] * 100.0 for name in RISK_WEIGHTS
-    }
-
-    factor_table = pd.DataFrame(
-        [
-            {
-                "Factor": name,
-                "Risk Signal": factor_risks[name],
-                "Weight": weight,
-                "Contribution": contributions[name],
-            }
-            for name, weight in RISK_WEIGHTS.items()
-        ]
-    )
-    factor_table["Direction"] = np.where(factor_table["Contribution"] >= 0, "Increases risk", "Reduces risk")
-    factor_table = factor_table.sort_values("Contribution", key=lambda series: series.abs(), ascending=False)
+    contributions, contribution_table, risk_score = build_model_contributions(monthly_income, loan_amount, age)
 
     if risk_score < 35:
         band = "LOW"
@@ -223,14 +228,13 @@ def assess_applicant(
         "score": round(risk_score, 1),
         "band": band,
         "label": label,
-        "factor_risks": factor_risks,
         "contributions": contributions,
-        "factor_table": factor_table,
+        "contribution_table": contribution_table,
         "confidence": round(100.0 - risk_score, 1),
     }
 
 
-def render_score_chart(contributions: dict[str, float]):
+def render_score_chart(contributions: dict[str, float], title: str = "Model-Derived Contributions"):
     try:
         import plotly.graph_objects as go
 
@@ -260,7 +264,7 @@ def render_score_chart(contributions: dict[str, float]):
             paper_bgcolor=CARD,
             plot_bgcolor=CARD,
             font=dict(color=TEXT, family="Arial, sans-serif"),
-            title=dict(text="XAI Risk Drivers", x=0.02, xanchor="left"),
+            title=dict(text=title, x=0.02, xanchor="left"),
             xaxis=dict(title="Risk push / relief points", zeroline=False, gridcolor="#e6edf5", tickfont=dict(color=TEXT)),
             yaxis=dict(tickfont=dict(color=TEXT)),
         )
@@ -375,6 +379,7 @@ st.markdown(
     <div class="hero-card">
         <div class="brand-strip">Global IME Bank Banking Dashboard</div>
         <h1 style="margin:0.6rem 0 0.35rem 0;">XAI-RAS v{APP_VERSION}</h1>
+        <div class="small-note">Model-driven scoring with dynamic feature contributions.</div>
         <div class="summary-badge">Score 0 = perfect | Score 100 = high risk</div>
     </div>
     ''',
@@ -424,7 +429,7 @@ with top_col:
         )
     st.write("")
     render_score_chart(assessment["contributions"])
-    st.caption("Positive bars increase risk; negative bars reduce risk. The chart is centered on a neutral baseline.")
+    st.caption("Positive bars increase risk; negative bars reduce risk. The chart shows model-derived contributions centered on a neutral baseline.")
     st.markdown("</div>", unsafe_allow_html=True)
 
 with bottom_col:
@@ -433,8 +438,8 @@ with bottom_col:
         st.subheader("Bank Officer View")
         st.caption("Technical metrics, explainability, and audit controls for credit officers.")
         st.dataframe(
-            assessment["factor_table"][ ["Factor", "Risk Signal", "Weight", "Contribution", "Direction"] ].style.format(
-                {"Risk Signal": "{:.2f}", "Weight": "{:.2f}", "Contribution": "{:+.1f}"}
+            assessment["contribution_table"][ ["Feature", "Current Value", "Baseline Value", "Model Importance", "Contribution", "Direction"] ].style.format(
+                {"Current Value": "{:.2f}", "Baseline Value": "{:.2f}", "Model Importance": "{:.3f}", "Contribution": "{:+.1f}"}
             ),
             use_container_width=True,
             hide_index=True,
@@ -446,11 +451,11 @@ with bottom_col:
                 <div class="metric-subtext">Base level: 50.0</div>
                 <div class="metric-subtext">Final score: {assessment['score']:.1f}/100</div>
                 <div class="metric-subtext">Decision path: {technical_status(assessment['score'])}</div>
-                <div class="metric-subtext">Interpretation uses the configured weights only.</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+        st.caption("XAI Engine: Dynamic Feature Importance (Random Forest v1.4). Interpretation is model-driven, not rule-based.")
         risk_score = assessment["score"]
         audit_log_text = (
             "Model Type: Random Forest Classifier\n"
