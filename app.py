@@ -188,7 +188,7 @@ def build_model_contributions(monthly_income: int, loan_amount: float, age: int)
                 "Feature": feature_name,
                 "Current Value": current_values[index],
                 "Baseline Value": MODEL_BASELINE_VALUES[index],
-                "Model Importance": MODEL_FEATURE_IMPORTANCES[index],
+                "Model Importance": MODEL_FEATURE_IMPORTANCES[index] * 100.0,
                 "Contribution": contributions[feature_name],
             }
             for index, feature_name in enumerate(MODEL_FEATURE_NAMES)
@@ -439,7 +439,7 @@ with bottom_col:
         st.caption("Technical metrics, explainability, and audit controls for credit officers.")
         st.dataframe(
             assessment["contribution_table"][ ["Feature", "Current Value", "Baseline Value", "Model Importance", "Contribution", "Direction"] ].style.format(
-                {"Current Value": "{:.2f}", "Baseline Value": "{:.2f}", "Model Importance": "{:.3f}", "Contribution": "{:+.1f}"}
+                {"Current Value": "{:.2f}", "Baseline Value": "{:.2f}", "Model Importance": "{:.1f}%", "Contribution": "{:+.1f}"}
             ),
             use_container_width=True,
             hide_index=True,
