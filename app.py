@@ -11,10 +11,38 @@ import streamlit as st
 
 from feature_engineering import add_feature_engineering
 
-model_path = Path(__file__).resolve().parent / "models" / "model.joblib"
-if not model_path.exists():
-    model_path = Path(__file__).resolve().parent / "model.joblib"
-model = joblib.load(model_path)
+
+@st.cache_resource
+def load_model_and_explainer():
+    """Load the trained model and initialize SHAP explainer.
+    
+    This function is cached to keep the model and explainer in memory,
+    preventing unnecessary reloads and ensuring optimal app performance.
+    
+    Returns:
+        tuple: (model, explainer) where explainer can be None if SHAP is not available
+    """
+    # Try to load from models/ directory first, then fall back to root
+    model_path = Path(__file__).resolve().parent / "models" / "model.joblib"
+    if not model_path.exists():
+        model_path = Path(__file__).resolve().parent / "model.joblib"
+    
+    model = joblib.load(model_path)
+    
+    # Initialize SHAP explainer if needed
+    # Uncomment and configure based on your model type
+    # try:
+    #     import shap
+    #     explainer = shap.TreeExplainer(model)
+    # except Exception as e:
+    #     print(f"Warning: Could not initialize SHAP explainer: {e}")
+    #     explainer = None
+    
+    return model
+
+
+# Load model using the cached function
+model = load_model_and_explainer()
 
 MODEL_FEATURE_NAMES = ("Income", "Loan Amount", "Age")
 MODEL_BASELINE_VALUES = np.array([80000.0, 500000.0, 35.0], dtype=float)
@@ -277,6 +305,30 @@ with st.sidebar:
     st.caption("Official Credit Assessment Tool")
     st.divider()
     
+    # 🚀 Load Winning Demo Example
+    if st.button("🚀 Load Winning Demo Example", use_container_width=True, type="primary"):
+        # Set all demo values in session state for the perfect applicant profile
+        st.session_state.monthly_income_input = 75000
+        st.session_state.loan_amount_input = 500000
+        st.session_state.primary_income_source_input = "Salary"
+        st.session_state.essential_expenses_input = 15000
+        st.session_state.monthly_installment_input = 20000
+        st.session_state.remittance_status_input = 1
+        st.session_state.land_area_input = 2.5
+        st.session_state.applicant_age_input = 40
+        st.session_state.utility_bill_payment_input = "Always on Time"
+        st.session_state.digital_wallet_input = 75
+        st.session_state.cib_score_input_widget = 750
+        st.session_state.remittance_volatility_input = -10
+        st.session_state.agricultural_yield_input = 20
+        st.session_state.cib_verified = True
+        st.session_state.ekyc_verified = True
+        st.session_state.monthly_income_time_spent_seconds = 3.5
+        st.session_state.monthly_income_interacted = True
+        st.success("✅ Gold Standard Example Loaded!")
+        st.info("📊 Perfect applicant profile ready for analysis. All fields prefilled.")
+    
+    st.markdown("---")
     st.header("Economic Stress Testing")
     remittance_decline_pct = st.slider(
         "Remittance Decline %",
@@ -1031,7 +1083,7 @@ with tab_onboard:
         st.markdown('<div class="panel-card">', unsafe_allow_html=True)
         st.markdown('<h2 class="section-heading">Applicant Inputs</h2>', unsafe_allow_html=True)
         view_mode = st.radio("View Mode", ["Bank Officer View", "Sajilo Natija (Customer View)"], index=0)
-        monthly_income = st.slider("Monthly Income (NPR)", min_value=0, max_value=200000, value=50000, step=1000, key="monthly_income_input")
+        monthly_income = st.slider("Monthly Income (NPR)", min_value=0, max_value=200000, value=st.session_state.get("monthly_income_input", 50000), step=1000, key="monthly_income_input")
         if (not st.session_state.monthly_income_interacted) and (monthly_income != st.session_state.monthly_income_prev_value):
             st.session_state.monthly_income_time_spent_seconds = max(
                 0.0,
@@ -1045,21 +1097,24 @@ with tab_onboard:
             "Desired Loan Amount (ऋण रकम) (NPR)",
             min_value=50000,
             max_value=5000000,
-            value=500000,
+            value=st.session_state.get("loan_amount_input", 500000),
             step=50000,
             help=loan_affordability_help,
+            key="loan_amount_input",
         )
         primary_income_source = st.selectbox(
             "Primary Income Source",
             ["Salary", "Business", "Agriculture", "Remittance", "Other"],
-            index=0,
+            index=["Salary", "Business", "Agriculture", "Remittance", "Other"].index(st.session_state.get("primary_income_source_input", "Salary")),
+            key="primary_income_source_input",
         )
         essential_expenses = st.slider(
             "Essential Monthly Expenses (NPR)",
             min_value=0,
             max_value=200000,
-            value=20000,
+            value=st.session_state.get("essential_expenses_input", 20000),
             step=1000,
+            key="essential_expenses_input",
         )
         monthly_installment = st.slider(
             "Monthly Installment (NPR)",
@@ -1073,12 +1128,13 @@ with tab_onboard:
             "Remittance Status",
             min_value=0,
             max_value=1,
-            value=1,
+            value=st.session_state.get("remittance_status_input", 1),
             step=1,
             help="0 = No remittance, 1 = Remittance received",
+            key="remittance_status_input",
         )
-        land_area = st.slider("Land Area (Ropani)", min_value=0.0, max_value=20.0, value=1.0, step=0.1)
-        applicant_age = st.slider("Applicant Age", min_value=18, max_value=80, value=30, step=1)
+        land_area = st.slider("Land Area (Ropani)", min_value=0.0, max_value=20.0, value=st.session_state.get("land_area_input", 1.0), step=0.1, key="land_area_input")
+        applicant_age = st.slider("Applicant Age", min_value=18, max_value=80, value=st.session_state.get("applicant_age_input", 30), step=1, key="applicant_age_input")
         st.caption(f"Remittance selected: {'Received' if remittance_status == 1 else 'Not received'}")
         with st.expander("JavaScript Snippet: Monthly Income Field Timing", expanded=False):
             st.caption("Reference snippet for frontend-level focus/blur timing in a custom Streamlit component.")
@@ -1090,17 +1146,19 @@ with tab_onboard:
             "Remittance Volatility (%)",
             min_value=-50,
             max_value=0,
-            value=-10,
+            value=st.session_state.get("remittance_volatility_input", -10),
             step=1,
             help="Negative values reduce the effective income used for stress testing.",
+            key="remittance_volatility_input",
         )
         agricultural_yield_drop = st.slider(
             "Agricultural Yield Drop (%)",
             min_value=0,
             max_value=50,
-            value=20,
+            value=st.session_state.get("agricultural_yield_input", 20),
             step=1,
             help="Applied only when Primary Income Source is Agriculture.",
+            key="agricultural_yield_input",
         )
 
         st.divider()
@@ -1108,15 +1166,17 @@ with tab_onboard:
         utility_bill_payment_consistency = st.selectbox(
             "Utility Bill Payment Consistency",
             ["Always on Time", "Occasional Delay", "Frequent Delay"],
-            index=0,
+            index=["Always on Time", "Occasional Delay", "Frequent Delay"].index(st.session_state.get("utility_bill_payment_input", "Always on Time")),
+            key="utility_bill_payment_input",
         )
         digital_wallet_transaction_frequency = st.slider(
             "Digital Wallet (eSewa/Khalti) Transaction Frequency",
             min_value=0,
             max_value=100,
-            value=45,
+            value=st.session_state.get("digital_wallet_input", 45),
             step=1,
             help="Use a normalized frequency score from 0 to 100.",
+            key="digital_wallet_input",
         )
 
         # Financial inclusion controls for alternative-data mapping
@@ -1289,9 +1349,10 @@ if policy_result.get("status") == "Hard Reject":
         "confidence": 0.0,
     }
 else:
-    baseline_risk_score = predict_risk_score(monthly_income, loan_amount, applicant_age)
-    stress_tested_risk_score = predict_risk_score(stress_tested_monthly_income, loan_amount, applicant_age)
-    assessment = assess_applicant(applicant_age, int(stress_tested_monthly_income), loan_amount, remittance_status, land_area, cib_score, loan_to_income_ratio)
+    with st.spinner('🤖 AI Orchestrator is analyzing risk...'):
+        baseline_risk_score = predict_risk_score(monthly_income, loan_amount, applicant_age)
+        stress_tested_risk_score = predict_risk_score(stress_tested_monthly_income, loan_amount, applicant_age)
+        assessment = assess_applicant(applicant_age, int(stress_tested_monthly_income), loan_amount, remittance_status, land_area, cib_score, loan_to_income_ratio)
 
 # Apply alternative-data boost only for borderline risk scores (40-70)
 if alt_data_mapping_enabled:
@@ -1322,17 +1383,18 @@ behavioral_utility_score, behavioral_wallet_score, behavioral_score, credit_360_
 
 # Unified orchestration report from compliance, ML scoring, and decision agents
 credit_orchestrator = CreditOrchestrator(model_version=MODEL_VERSION)
-credit_orchestrator_report = credit_orchestrator.run(
-    age=applicant_age,
-    monthly_income=int(stress_tested_monthly_income),
-    loan_amount=loan_amount,
-    remittance_status=remittance_status,
-    land_area=land_area,
-    cib_score=cib_score,
-    loan_to_income_ratio=loan_to_income_ratio,
-    cib_verified=bool(st.session_state.get("cib_verified", False)),
-    ekyc_verified=bool(st.session_state.get("ekyc_verified", False)),
-)
+with st.spinner('📋 Credit Orchestrator is generating compliance report...'):
+    credit_orchestrator_report = credit_orchestrator.run(
+        age=applicant_age,
+        monthly_income=int(stress_tested_monthly_income),
+        loan_amount=loan_amount,
+        remittance_status=remittance_status,
+        land_area=land_area,
+        cib_score=cib_score,
+        loan_to_income_ratio=loan_to_income_ratio,
+        cib_verified=bool(st.session_state.get("cib_verified", False)),
+        ekyc_verified=bool(st.session_state.get("ekyc_verified", False)),
+    )
 
 # Prepare audit payload for use in the Regulatory tab and downloads
 top_shap_factors = format_top_shap_factors(assessment["contribution_table"], top_n=3)
