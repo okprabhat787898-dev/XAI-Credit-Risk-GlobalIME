@@ -7,7 +7,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-model = joblib.load('model.joblib')
+model_path = Path(__file__).resolve().parent / "models" / "model.joblib"
+if not model_path.exists():
+    model_path = Path(__file__).resolve().parent / "model.joblib"
+model = joblib.load(model_path)
 
 APP_VERSION = "1.4.0"
 RED = "#C5161D"
