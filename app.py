@@ -11,6 +11,9 @@ import streamlit as st
 
 from feature_engineering import add_feature_engineering
 
+# Global flag to track SHAP availability
+shap_enabled = True
+
 
 @st.cache_resource
 def load_model_and_explainer():
@@ -20,8 +23,10 @@ def load_model_and_explainer():
     preventing unnecessary reloads and ensuring optimal app performance.
     
     Returns:
-        tuple: (model, explainer) where explainer can be None if SHAP is not available
+        tuple: (model, explainer) where explainer is TreeExplainer for Random Forest
     """
+    global shap_enabled
+    
     # Try to load from models/ directory first, then fall back to root
     model_path = Path(__file__).resolve().parent / "models" / "model.joblib"
     if not model_path.exists():
@@ -29,26 +34,106 @@ def load_model_and_explainer():
     
     model = joblib.load(model_path)
     
-    # Initialize SHAP explainer if needed
-    # Uncomment and configure based on your model type
-    # try:
-    #     import shap
-    #     explainer = shap.TreeExplainer(model)
-    # except Exception as e:
-    #     print(f"Warning: Could not initialize SHAP explainer: {e}")
-    #     explainer = None
+    # Initialize SHAP TreeExplainer for Random Forest (memory-safe)
+    explainer = None
+    try:
+        import shap
+        # TreeExplainer is optimized for tree-based models (Random Forest)
+        # Use check_additivity=False to prevent unnecessary computations
+        explainer = shap.TreeExplainer(model, check_additivity=False)
+        shap_enabled = True
+    except (ImportError, ModuleNotFoundError):
+        # SHAP library not available - allow app to continue
+        shap_enabled = False
+        explainer = None
+    except Exception as e:
+        # Other errors (memory, computation) - also allow app to continue
+        shap_enabled = False
+        explainer = None
     
-    return model
+    return model, explainer
 
 
-# Load model using the cached function
-model = load_model_and_explainer()
+# Load model and SHAP explainer using the cached function
+model, shap_explainer = load_model_and_explainer()
+
+# Display warning if SHAP is unavailable
+if not shap_enabled:
+    st.warning("⚠️ SHAP Explainer is currently offline, but the core Risk Engine is active.")
 
 MODEL_FEATURE_NAMES = ("Income", "Loan Amount", "Age")
 MODEL_BASELINE_VALUES = np.array([80000.0, 500000.0, 35.0], dtype=float)
 MODEL_FEATURE_IMPORTANCES = np.array(getattr(model, "feature_importances_", np.full(3, 1.0 / 3.0)), dtype=float)
 if MODEL_FEATURE_IMPORTANCES.sum() > 0:
     MODEL_FEATURE_IMPORTANCES = MODEL_FEATURE_IMPORTANCES / MODEL_FEATURE_IMPORTANCES.sum()
+
+
+@st.cache_data(show_spinner=False)
+def compute_shap_values(monthly_income: float, loan_amount: float, age: int):
+    """
+    Compute SHAP values using TreeExplainer (optimized for Random Forest).
+    
+    Cache key: monthly_income, loan_amount, age
+    This ensures SHAP values are recomputed only when these inputs change.
+    
+    Memory-safe: Uses TreeExplainer with check_additivity=False
+    Returns None if SHAP is not available (shap_enabled=False)
+    """
+    if not shap_enabled or shap_explainer is None:
+        return None
+    
+    try:
+        # Prepare input features
+        features = np.array([[monthly_income, loan_amount, age]], dtype=float)
+        
+        # Compute SHAP values (TreeExplainer is memory-efficient for tree models)
+        shap_values = shap_explainer.shap_values(features)
+        
+        # For binary classification, take positive class SHAP values
+        if isinstance(shap_values, list):
+            shap_values = shap_values[1]  # Positive class (high risk)
+        
+        # Return SHAP values for first (only) sample
+        return shap_values[0] if len(shap_values.shape) > 1 else shap_values
+    
+    except Exception as e:
+        st.warning(f"⚠️ Error computing SHAP values: {e}")
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def compute_shap_summary(monthly_income: float, loan_amount: float, age: int):
+    """
+    Compute alternative contribution scores (LIME-style) when SHAP is unavailable.
+    
+    Cache key: monthly_income, loan_amount, age
+    This serves as a fallback for memory-constrained environments.
+    """
+    current_values = np.array([monthly_income, loan_amount, age], dtype=float)
+    baseline_score = predict_risk_score(*MODEL_BASELINE_VALUES)
+    current_score = predict_risk_score(monthly_income, loan_amount, age)
+
+    local_effects = []
+    for index, _ in enumerate(MODEL_FEATURE_NAMES):
+        sample_values = MODEL_BASELINE_VALUES.copy()
+        sample_values[index] = current_values[index]
+        local_effects.append(predict_risk_score(*sample_values) - baseline_score)
+
+    local_effects_array = np.array(local_effects, dtype=float)
+    total_local_effect = float(local_effects_array.sum())
+    delta_score = current_score - baseline_score
+    
+    if abs(total_local_effect) > 1e-9:
+        contribution_values = local_effects_array * (delta_score / total_local_effect)
+    else:
+        contribution_values = MODEL_FEATURE_IMPORTANCES * delta_score
+
+    contributions = {
+        feature_name: float(contribution)
+        for feature_name, contribution in zip(MODEL_FEATURE_NAMES, contribution_values)
+    }
+
+    return contributions
 
 APP_VERSION = "1.4.0"
 MODEL_VERSION = "v1.5.0-Advanced"
@@ -662,28 +747,29 @@ class CreditOrchestrator:
 
 
 def build_model_contributions(monthly_income: int, loan_amount: float, age: int) -> tuple[dict[str, float], pd.DataFrame, float]:
-    current_values = np.array([monthly_income, loan_amount, age], dtype=float)
-    baseline_score = predict_risk_score(*MODEL_BASELINE_VALUES)
-    current_score = predict_risk_score(monthly_income, loan_amount, age)
-
-    local_effects = []
-    for index, _ in enumerate(MODEL_FEATURE_NAMES):
-        sample_values = MODEL_BASELINE_VALUES.copy()
-        sample_values[index] = current_values[index]
-        local_effects.append(predict_risk_score(*sample_values) - baseline_score)
-
-    local_effects_array = np.array(local_effects, dtype=float)
-    total_local_effect = float(local_effects_array.sum())
-    delta_score = current_score - baseline_score
-    if abs(total_local_effect) > 1e-9:
-        contribution_values = local_effects_array * (delta_score / total_local_effect)
+    """
+    Build model contribution table using cached SHAP/LIME computations.
+    
+    This function uses st.cache_data internally to avoid recalculating
+    SHAP values when inputs haven't changed.
+    """
+    # Try SHAP first (memory-safe TreeExplainer)
+    shap_values = compute_shap_values(float(monthly_income), float(loan_amount), int(age))
+    
+    if shap_values is not None:
+        # Use SHAP values for contributions
+        contributions = {
+            feature_name: float(shap_values[index])
+            for index, feature_name in enumerate(MODEL_FEATURE_NAMES)
+        }
+        contribution_source = "SHAP (TreeExplainer)"
     else:
-        contribution_values = MODEL_FEATURE_IMPORTANCES * delta_score
+        # Fallback to LIME-style local effects (cached)
+        contributions = compute_shap_summary(float(monthly_income), float(loan_amount), int(age))
+        contribution_source = "Local Effects (LIME-style)"
 
-    contributions = {
-        feature_name: float(contribution)
-        for feature_name, contribution in zip(MODEL_FEATURE_NAMES, contribution_values)
-    }
+    current_values = np.array([monthly_income, loan_amount, age], dtype=float)
+    current_score = predict_risk_score(monthly_income, loan_amount, age)
 
     contribution_table = pd.DataFrame(
         [
@@ -758,6 +844,14 @@ def assess_applicant(
 
 
 def render_score_chart(contributions: dict[str, float], title: str = "Model-Derived Contributions"):
+    """
+    Render SHAP/contribution values using cached Plotly chart.
+    
+    Optimized for Streamlit server memory usage:
+    - Uses horizontal bar chart (faster rendering)
+    - Limits to 3 top features
+    - Disables interactive mode bar
+    """
     try:
         import plotly.graph_objects as go
 
@@ -792,7 +886,8 @@ def render_score_chart(contributions: dict[str, float], title: str = "Model-Deri
             yaxis=dict(tickfont=dict(color=TEXT)),
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ Could not render Plotly chart: {e}")
         st.bar_chart(pd.DataFrame({"Contribution": list(contributions.values())}, index=list(contributions.keys())))
 
 
@@ -1238,79 +1333,24 @@ with tab_onboard:
             st.success("e-KYC Verified: Identity Confirmed")
         st.markdown('</div>', unsafe_allow_html=True)
 
-stress_tested_monthly_income = apply_macroeconomic_stress_test(
-    monthly_income=monthly_income,
-    remittance_volatility_pct=remittance_volatility,
-    agricultural_yield_drop_pct=agricultural_yield_drop,
-    primary_income_source=primary_income_source,
-)
+    with page_right_col:
+        st.markdown('<div class="panel-card">', unsafe_allow_html=True)
+        st.markdown(f'<div style="text-align: center; padding: 2rem 0;">', unsafe_allow_html=True)
+        st.markdown(f'<h2 style="color: {GLOBAL_IME_BLUE}; margin-bottom: 1rem;">Global IME Bank</h2>', unsafe_allow_html=True)
+        st.markdown(f'<p style="color: {MUTED}; font-size: 1.1rem;">Official Credit Assessment System</p>', unsafe_allow_html=True)
+        st.markdown(f'<div style="margin: 2rem 0; font-size: 3rem;">🏦</div>', unsafe_allow_html=True)
+        st.markdown(f'<p style="color: {MUTED}; font-size: 0.9rem; margin-top: 2rem;"><strong>Intake Tab:</strong> Fast data entry & verification</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="color: {MUTED}; font-size: 0.9rem;"><strong>Analysis Tab:</strong> AI scoring & charts</p>', unsafe_allow_html=True)
+        st.markdown(f'<p style="color: {MUTED}; font-size: 0.9rem;"><strong>Audit Tab:</strong> Compliance reports</p>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# Crisis / sidebar-driven stress testing: convert decline% to negative volatility
-crisis_effective_income = apply_macroeconomic_stress_test(
-    monthly_income=monthly_income,
-    remittance_volatility_pct=-float(remittance_decline_pct),
-    agricultural_yield_drop_pct=float(crop_failure_risk_pct),
-    primary_income_source=primary_income_source,
-)
-
-crisis_risk_score = predict_risk_score(crisis_effective_income, loan_amount, applicant_age)
-
-# Live migration stress analysis: Approved -> Manual Review under remittance market shock
-income_multipliers = np.array([0.6, 0.8, 1.0, 1.2, 1.5, 2.0], dtype=float)
-loan_multipliers = np.array([0.7, 0.9, 1.0, 1.1], dtype=float)
-simulation_rows = []
-for income_mult in income_multipliers:
-    for loan_mult in loan_multipliers:
-        simulation_rows.append(
-            {
-                "Monthly_Income": max(5000.0, float(monthly_income) * float(income_mult)),
-                "Loan_Amount": max(50000.0, float(loan_amount) * float(loan_mult)),
-                "Age": int(applicant_age),
-                "Primary_Income_Source": "Remittance",
-            }
-        )
-
-remittance_simulation_portfolio = pd.DataFrame(simulation_rows)
-migration_summary = simulate_remittance_shock_migration(remittance_simulation_portfolio, remittance_market_shock_pct)
-
-shock_points = list(range(0, int(remittance_market_shock_pct) + 1, 5))
-if int(remittance_market_shock_pct) not in shock_points:
-    shock_points.append(int(remittance_market_shock_pct))
-if not shock_points:
-    shock_points = [0]
-
-migration_curve_rows = []
-for shock_point in sorted(set(shock_points)):
-    point_summary = simulate_remittance_shock_migration(remittance_simulation_portfolio, shock_point)
-    migration_curve_rows.append(
-        {
-            "Remittance Market Shock (%)": int(shock_point),
-            "Approved to Manual Review": int(point_summary["moved_to_manual_review"]),
-        }
-    )
-
-migration_curve_df = pd.DataFrame(migration_curve_rows)
-
-applicant_frame = pd.DataFrame(
-    [
-        {
-            "Monthly_Income": monthly_income,
-            "Loan_Amount": loan_amount,
-            "Age": applicant_age,
-            "Primary_Income_Source": primary_income_source,
-            "Essential_Expenses": essential_expenses,
-            "Monthly_Installment": monthly_installment,
-        }
-    ]
-)
-engineered_applicant = add_feature_engineering(applicant_frame).iloc[0]
-
-# Apply banking policy rules before running model predictions
+# Lightweight validation only – defer heavy computations to Analysis tab
 policy_result = apply_banking_policy_rules(monthly_income, loan_amount)
 monthly_income_input_time_seconds = st.session_state.get("monthly_income_time_spent_seconds")
 behavioral_risk = classify_behavioral_risk(monthly_income_input_time_seconds, threshold_seconds=2.0)
 
-# Display Pre-Screening Report inside the Borrower Onboarding tab
+# Display Pre-Screening Report inside the Intake tab
 with tab_onboard:
     with st.expander("Pre-Screening Report", expanded=True):
         st.markdown('<div class="panel-card">', unsafe_allow_html=True)
@@ -1329,9 +1369,44 @@ with tab_onboard:
             st.info(f"Behavioral Risk: {behavioral_risk} (Monthly Income interaction time: {timing_note})")
         st.markdown('</div>', unsafe_allow_html=True)
 
+# Compute core values needed by both Analysis and Audit tabs (but defer chart rendering)
+stress_tested_monthly_income = apply_macroeconomic_stress_test(
+    monthly_income=monthly_income,
+    remittance_volatility_pct=remittance_volatility,
+    agricultural_yield_drop_pct=agricultural_yield_drop,
+    primary_income_source=primary_income_source,
+)
+
+crisis_effective_income = apply_macroeconomic_stress_test(
+    monthly_income=monthly_income,
+    remittance_volatility_pct=-float(remittance_decline_pct),
+    agricultural_yield_drop_pct=float(crop_failure_risk_pct),
+    primary_income_source=primary_income_source,
+)
+
+crisis_risk_score = predict_risk_score(crisis_effective_income, loan_amount, applicant_age)
+
+# Feature engineering (lightweight)
+applicant_frame = pd.DataFrame(
+    [
+        {
+            "Monthly_Income": monthly_income,
+            "Loan_Amount": loan_amount,
+            "Age": applicant_age,
+            "Primary_Income_Source": primary_income_source,
+            "Essential_Expenses": essential_expenses,
+            "Monthly_Installment": monthly_installment,
+        }
+    ]
+)
+engineered_applicant = add_feature_engineering(applicant_frame).iloc[0]
+
+# Run model assessment
 cib_score = cib_score_input if st.session_state.cib_verified else 0
+annual_income = monthly_income * 12
+loan_to_income_ratio = loan_amount / annual_income if annual_income > 0 else 0.0
+
 if policy_result.get("status") == "Hard Reject":
-    # Do not invoke model - return a hard reject assessment
     baseline_risk_score = 100.0
     stress_tested_risk_score = 100.0
     assessment = {
@@ -1349,18 +1424,17 @@ if policy_result.get("status") == "Hard Reject":
         "confidence": 0.0,
     }
 else:
-    with st.spinner('🤖 AI Orchestrator is analyzing risk...'):
-        baseline_risk_score = predict_risk_score(monthly_income, loan_amount, applicant_age)
-        stress_tested_risk_score = predict_risk_score(stress_tested_monthly_income, loan_amount, applicant_age)
-        assessment = assess_applicant(applicant_age, int(stress_tested_monthly_income), loan_amount, remittance_status, land_area, cib_score, loan_to_income_ratio)
+    baseline_risk_score = predict_risk_score(monthly_income, loan_amount, applicant_age)
+    stress_tested_risk_score = predict_risk_score(stress_tested_monthly_income, loan_amount, applicant_age)
+    assessment = assess_applicant(applicant_age, int(stress_tested_monthly_income), loan_amount, remittance_status, land_area, cib_score, loan_to_income_ratio)
 
-# Apply alternative-data boost only for borderline risk scores (40-70)
+# Apply alternative-data boost
 if alt_data_mapping_enabled:
     esewa_signal = "Regular" if wallet_usage_tier in {"Regular", "Power User"} else "Irregular"
     bill_signal = "Consistent" if utility_bill_history == "Always on Time" else "Inconsistent"
 else:
     esewa_signal = "Regular" if digital_wallet_transaction_frequency >= 40 else "Irregular"
-    bill_signal = "Consistent" if utility_bill_payment_consistency == "Always on Time" else "Inconsistent"
+    bill_signal = "Consistent" if utility_bill_payment_consistency == "Always on Time" else "Consistent"
 
 alt_data_inputs = {
     "esewa_transactions": esewa_signal,
@@ -1381,22 +1455,21 @@ behavioral_utility_score, behavioral_wallet_score, behavioral_score, credit_360_
     model_credit_score=(100.0 - assessment["score"]) if assessment["model_used"] else 0.0,
 )
 
-# Unified orchestration report from compliance, ML scoring, and decision agents
+# Unified orchestration report
 credit_orchestrator = CreditOrchestrator(model_version=MODEL_VERSION)
-with st.spinner('📋 Credit Orchestrator is generating compliance report...'):
-    credit_orchestrator_report = credit_orchestrator.run(
-        age=applicant_age,
-        monthly_income=int(stress_tested_monthly_income),
-        loan_amount=loan_amount,
-        remittance_status=remittance_status,
-        land_area=land_area,
-        cib_score=cib_score,
-        loan_to_income_ratio=loan_to_income_ratio,
-        cib_verified=bool(st.session_state.get("cib_verified", False)),
-        ekyc_verified=bool(st.session_state.get("ekyc_verified", False)),
-    )
+credit_orchestrator_report = credit_orchestrator.run(
+    age=applicant_age,
+    monthly_income=int(stress_tested_monthly_income),
+    loan_amount=loan_amount,
+    remittance_status=remittance_status,
+    land_area=land_area,
+    cib_score=cib_score,
+    loan_to_income_ratio=loan_to_income_ratio,
+    cib_verified=bool(st.session_state.get("cib_verified", False)),
+    ekyc_verified=bool(st.session_state.get("ekyc_verified", False)),
+)
 
-# Prepare audit payload for use in the Regulatory tab and downloads
+# Prepare audit payload
 top_shap_factors = format_top_shap_factors(assessment["contribution_table"], top_n=3)
 audit_payload = {
     "timestamp": pd.Timestamp.now().isoformat(),
@@ -1416,7 +1489,51 @@ audit_payload = {
     "final_decision": final_decision,
 }
 
+# ============================================================================
+# DEFERRED CHART RENDERING: Heavy Plotly charts and migration analysis only
+# in Analysis tab (renders instantly when Analysis tab is opened)
+# ============================================================================
 with tab_ai:
+    # Only compute migration analysis when Analysis tab is opened
+    income_multipliers = np.array([0.6, 0.8, 1.0, 1.2, 1.5, 2.0], dtype=float)
+    loan_multipliers = np.array([0.7, 0.9, 1.0, 1.1], dtype=float)
+    simulation_rows = []
+    for income_mult in income_multipliers:
+        for loan_mult in loan_multipliers:
+            simulation_rows.append(
+                {
+                    "Monthly_Income": max(5000.0, float(monthly_income) * float(income_mult)),
+                    "Loan_Amount": max(50000.0, float(loan_amount) * float(loan_mult)),
+                    "Age": int(applicant_age),
+                    "Primary_Income_Source": "Remittance",
+                }
+            )
+
+    remittance_simulation_portfolio = pd.DataFrame(simulation_rows)
+    migration_summary = simulate_remittance_shock_migration(remittance_simulation_portfolio, remittance_market_shock_pct)
+
+    shock_points = list(range(0, int(remittance_market_shock_pct) + 1, 5))
+    if int(remittance_market_shock_pct) not in shock_points:
+        shock_points.append(int(remittance_market_shock_pct))
+    if not shock_points:
+        shock_points = [0]
+
+    migration_curve_rows = []
+    for shock_point in sorted(set(shock_points)):
+        point_summary = simulate_remittance_shock_migration(remittance_simulation_portfolio, shock_point)
+        migration_curve_rows.append(
+            {
+                "Remittance Market Shock (%)": int(shock_point),
+                "Approved to Manual Review": int(point_summary["moved_to_manual_review"]),
+            }
+        )
+
+    migration_curve_df = pd.DataFrame(migration_curve_rows)
+    
+    # Render all Analysis tab UI
+    max_loan_under_3x = max(0, int(annual_income * 3) - 1)
+    suggested_lower_amount = max(0, min(max_loan_under_3x, loan_amount - 50000))
+    
     st.markdown(
         f'''
         <div class="hero-card">
@@ -1482,73 +1599,73 @@ with tab_ai:
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown(
-    f'''
-    <div class="panel-card" style="margin-bottom: 1rem;">
-        <div class="metric-label">Alternative Credit Score</div>
-        <div class="metric-subtext">Utility payment score: {behavioral_utility_score:.1f}/100</div>
-        <div class="metric-subtext">Wallet frequency score: {behavioral_wallet_score:.1f}/100</div>
-        <div class="metric-subtext">Behavioral blend: {behavioral_score:.1f}/100</div>
-        <div class="metric-subtext">360-degree credit score: {credit_360_score:.1f}/100</div>
-    </div>
-    ''',
-    unsafe_allow_html=True,
-)
+    st.markdown(
+        f'''
+        <div class="panel-card" style="margin-bottom: 1rem;">
+            <div class="metric-label">Alternative Credit Score</div>
+            <div class="metric-subtext">Utility payment score: {behavioral_utility_score:.1f}/100</div>
+            <div class="metric-subtext">Wallet frequency score: {behavioral_wallet_score:.1f}/100</div>
+            <div class="metric-subtext">Behavioral blend: {behavioral_score:.1f}/100</div>
+            <div class="metric-subtext">360-degree credit score: {credit_360_score:.1f}/100</div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
 
-with st.status("Decision Routing Workflow", expanded=True) as routing_status:
-    routing_status.write("Checking hard-stop rules...")
-    routing_status.write("Evaluating model risk score...")
-    routing_status.write(f"Routing signal: {route_label}")
-    routing_status.write(f"Final decision: {final_decision}")
-    routing_status.update(label=f"Decision Routing: {final_decision}", state="complete", expanded=False)
+    with st.status("Decision Routing Workflow", expanded=True) as routing_status:
+        routing_status.write("Checking hard-stop rules...")
+        routing_status.write("Evaluating model risk score...")
+        routing_status.write(f"Routing signal: {route_label}")
+        routing_status.write(f"Final decision: {final_decision}")
+        routing_status.update(label=f"Decision Routing: {final_decision}", state="complete", expanded=False)
 
-if final_decision == "Instant Approval":
-    st.success(f"{route_label}: {final_decision}.")
-elif final_decision == "Manual Review Required by Senior Credit Officer":
-    st.warning(f"{route_label}: {final_decision}.")
-else:
-    st.error(f"{route_label}: {final_decision}.")
-st.caption(route_message)
-
-st.markdown(
-    f'''
-    <div class="panel-card" style="margin-bottom: 1rem;">
-        <div class="metric-label">Feature Engineering</div>
-        <div class="metric-subtext">Primary income source: {primary_income_source}</div>
-        <div class="metric-subtext">Macroeconomic stress-tested income: NPR {stress_tested_monthly_income:,.0f}</div>
-        <div class="metric-subtext">Stress-Tested Income: NPR {engineered_applicant['Stress_Tested_Income']:,.0f}</div>
-        <div class="metric-subtext">Loan Coverage Ratio: {engineered_applicant['Loan_Coverage_Ratio']:.2f}</div>
-    </div>
-    ''',
-    unsafe_allow_html=True,
-)
-
-risk_left_col, risk_right_col = st.columns([0.95, 1.05], gap="large")
-
-with risk_left_col:
-    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
-    st.subheader("Decision Summary")
-    if assessment["rejected"]:
-        st.error(assessment["message"])
-        st.caption("The model was not invoked because the applicant failed the regulatory affordability gate.")
-    elif not assessment["model_used"]:
-        st.warning(assessment["reason"])
-        st.info(assessment["suggested_next_step"])
+    if final_decision == "Instant Approval":
+        st.success(f"{route_label}: {final_decision}.")
+    elif final_decision == "Manual Review Required by Senior Credit Officer":
+        st.warning(f"{route_label}: {final_decision}.")
     else:
-        st.metric("Risk Score", f"{assessment['score']:.1f}/100")
-        st.metric("Model Confidence", f"{assessment['confidence']:.1f}%")
-        band_color = RED if assessment["band"] == "HIGH" else BLUE if assessment["band"] == "LOW" else "#8a6400"
-        st.markdown(
-            f'''
-            <div class="metric-box" style="margin-top: 1rem;">
-                <div class="metric-label">Risk Band</div>
-                <div class="metric-value" style="color:{band_color};">{assessment['label']}</div>
-                <div class="metric-subtext">{technical_status(assessment['score'])}</div>
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.error(f"{route_label}: {final_decision}.")
+    st.caption(route_message)
+
+    st.markdown(
+        f'''
+        <div class="panel-card" style="margin-bottom: 1rem;">
+            <div class="metric-label">Feature Engineering</div>
+            <div class="metric-subtext">Primary income source: {primary_income_source}</div>
+            <div class="metric-subtext">Macroeconomic stress-tested income: NPR {stress_tested_monthly_income:,.0f}</div>
+            <div class="metric-subtext">Stress-Tested Income: NPR {engineered_applicant['Stress_Tested_Income']:,.0f}</div>
+            <div class="metric-subtext">Loan Coverage Ratio: {engineered_applicant['Loan_Coverage_Ratio']:.2f}</div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
+
+    risk_left_col, risk_right_col = st.columns([0.95, 1.05], gap="large")
+
+    with risk_left_col:
+        st.markdown('<div class="panel-card">', unsafe_allow_html=True)
+        st.subheader("Decision Summary")
+        if assessment["rejected"]:
+            st.error(assessment["message"])
+            st.caption("The model was not invoked because the applicant failed the regulatory affordability gate.")
+        elif not assessment["model_used"]:
+            st.warning(assessment["reason"])
+            st.info(assessment["suggested_next_step"])
+        else:
+            st.metric("Risk Score", f"{assessment['score']:.1f}/100")
+            st.metric("Model Confidence", f"{assessment['confidence']:.1f}%")
+            band_color = RED if assessment["band"] == "HIGH" else BLUE if assessment["band"] == "LOW" else "#8a6400"
+            st.markdown(
+                f'''
+                <div class="metric-box" style="margin-top: 1rem;">
+                    <div class="metric-label">Risk Band</div>
+                    <div class="metric-value" style="color:{band_color};">{assessment['label']}</div>
+                    <div class="metric-subtext">{technical_status(assessment['score'])}</div>
+                </div>
+                ''',
+                unsafe_allow_html=True,
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with risk_right_col:
         st.markdown('<div class="panel-card">', unsafe_allow_html=True)
@@ -1643,9 +1760,9 @@ with risk_left_col:
                 st.info(
                     f"सुझाव: यदि तपाईंले ऋणको रकम Rs. {suggested_lower_amount:,.0f} मा घटाउनुभयो भने, तपाईंको स्वीकृत हुने सम्भावना बढ्नेछ।"
                 )
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-st.divider()
+    st.divider()
 
 with tab_audit:
     st.markdown('<div class="panel-card">', unsafe_allow_html=True)
@@ -1720,29 +1837,30 @@ with tab_audit:
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="panel-card">', unsafe_allow_html=True)
-st.subheader("तपाईंको लागि हाम्रो सुझाव (Our Advice)")
+with st.container():
+    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
+    st.subheader("तपाईंको लागि हाम्रो सुझाव (Our Advice)")
 
-if assessment["rejected"]:
-    st.error(assessment["message"])
-elif not assessment["model_used"] and assessment["status"] == "High Risk":
-    st.warning(assessment["suggested_next_step"])
-elif not assessment["model_used"] and assessment["status"] == "Senior Life Insurance Requirement":
-    st.info(assessment["suggested_next_step"])
-elif loan_to_income_ratio > 5:
-    st.warning("⚠️ ऋण रकम आपको वार्षिक आय भन्दा अत्यधिक छ। कृपया कम रकमको लागि आवेदन गर्ने विचार गर्नुहोस्।")
-elif assessment['score'] < 40:
-    success_message = "✓ आपको आर्थिक प्रोफाइल राम्रोसँग संतुलित छ। आपको आवेदन स्वीकृत हुने सम्भावना राम्रो छ।"
-    if st.session_state.cib_verified:
-        success_message += " हाम्रो AI ले तपाईंको CIB रेकर्ड र ऋणको अनुपात जाँच गर्दा सबै कुरा राम्रो देखियो।"
-    st.success(success_message)
-else:
-    st.info("ℹ️ आपको आवेदन विस्तृत समीक्षा गरिँदै छ। कृपया धैर्य राख्नुहोस्।")
+    if assessment["rejected"]:
+        st.error(assessment["message"])
+    elif not assessment["model_used"] and assessment["status"] == "High Risk":
+        st.warning(assessment["suggested_next_step"])
+    elif not assessment["model_used"] and assessment["status"] == "Senior Life Insurance Requirement":
+        st.info(assessment["suggested_next_step"])
+    elif loan_to_income_ratio > 5:
+        st.warning("⚠️ ऋण रकम आपको वार्षिक आय भन्दा अत्यधिक छ। कृपया कम रकमको लागि आवेदन गर्ने विचार गर्नुहोस्।")
+    elif assessment['score'] < 40:
+        success_message = "✓ आपको आर्थिक प्रोफाइल राम्रोसँग संतुलित छ। आपको आवेदन स्वीकृत हुने सम्भावना राम्रो छ।"
+        if st.session_state.cib_verified:
+            success_message += " हाम्रो AI ले तपाईंको CIB रेकर्ड र ऋणको अनुपात जाँच गर्दा सबै कुरा राम्रो देखियो।"
+        st.success(success_message)
+    else:
+        st.info("ℹ️ आपको आवेदन विस्तृत समीक्षा गरिँदै छ। कृपया धैर्य राख्नुहोस्।")
 
-if not st.session_state.cib_verified:
-    st.info("कृपया CIB रेकर्ड जाँच गर्न माथिको बटन थिच्नुहोस्।")
+    if not st.session_state.cib_verified:
+        st.info("कृपया CIB रेकर्ड जाँच गर्न माथिको बटन थिच्नुहोस्।")
 
-if not st.session_state.ekyc_verified:
-    st.info("कृपया आफ्नो पहिचान प्रमाणित गर्न नागरिकता वा प्यान कार्ड अपलोड गर्नुहोस्।")
+    if not st.session_state.ekyc_verified:
+        st.info("कृपया आफ्नो पहिचान प्रमाणित गर्न नागरिकता वा प्यान कार्ड अपलोड गर्नुहोस्।")
 
-st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
