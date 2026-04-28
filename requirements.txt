@@ -1,8 +1,8 @@
 streamlit
 pandas
+numpy
+scikit-learn
+shap
 plotly
 joblib
-scikit-learn
-numpy
-shap
 numba
