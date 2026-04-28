@@ -4,3 +4,5 @@ plotly
 joblib
 scikit-learn
 JavaScript
+numpy
+shap
