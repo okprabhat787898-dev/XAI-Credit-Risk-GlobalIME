@@ -18,17 +18,16 @@ shap_error_message = None
 
 @st.cache_resource
 def load_model_and_explainer():
-    """Load the trained model and initialize SHAP explainer with sampled background data.
+    """Load the trained model and initialize SHAP explainer.
     
     This function is cached to keep the model and explainer in memory,
     preventing unnecessary reloads and ensuring optimal app performance.
     
-    Uses shap.sample(X_train, 50) for memory-efficient background data instead of
-    the full training set. This reduces memory usage by 80-90% on resource-constrained
-    Streamlit Cloud servers.
+    Uses shap.Explainer which automatically detects the model type (Random Forest)
+    and uses optimal settings for tree-based models.
     
     Returns:
-        tuple: (model, explainer, error_message) where explainer is TreeExplainer for Random Forest
+        tuple: (model, explainer, error_message) where explainer is initialized for the model
     """
     global shap_enabled, shap_error_message
     
@@ -39,29 +38,15 @@ def load_model_and_explainer():
     
     model = joblib.load(model_path)
     
-    # Initialize SHAP TreeExplainer for Random Forest (memory-safe with sampled background data)
+    # Initialize SHAP Explainer (automatically optimized for Random Forest)
     explainer = None
     error_msg = None
     try:
         import shap
         
-        # Load training features for memory-efficient background data
-        X_train_path = Path(__file__).resolve().parent / "X_train.joblib"
-        if X_train_path.exists():
-            X_train = joblib.load(X_train_path)
-            # Use shap.sample() to create a small background dataset (50 samples)
-            # This reduces memory usage by 80-90% compared to full training set
-            background_data = shap.sample(X_train, 50)
-        else:
-            # Fallback: no background data (slower but still works)
-            background_data = None
-        
-        # TreeExplainer is optimized for tree-based models (Random Forest)
-        # Use check_additivity=False to prevent unnecessary computations
-        if background_data is not None:
-            explainer = shap.TreeExplainer(model, background_data, check_additivity=False)
-        else:
-            explainer = shap.TreeExplainer(model, check_additivity=False)
+        # Use shap.Explainer which auto-detects model type and optimizes accordingly
+        # Simpler and more robust than shap.TreeExplainer
+        explainer = shap.Explainer(model)
         
         shap_enabled = True
     except (ImportError, ModuleNotFoundError) as e:
@@ -86,9 +71,9 @@ def load_model_and_explainer():
 # Load model and SHAP explainer using the cached function
 model, shap_explainer, shap_error_message = load_model_and_explainer()
 
-# Display error details if SHAP is unavailable
+# Display error details if SHAP is unavailable (shown at app startup for debugging)
 if not shap_enabled and shap_error_message:
-    st.error(f"⚠️ SHAP Error: {shap_error_message}\n\nThe core Risk Engine remains active. Falling back to LIME-style feature contributions.")
+    st.error(f"⚠️ SHAP Explainer Failed to Initialize\n\n**Technical Error:**\n```\n{shap_error_message}\n```\n\n**Impact:** The core Risk Engine remains active. Falling back to LIME-style feature contributions for model explainability.")
 elif not shap_enabled:
     st.warning("⚠️ SHAP Explainer is currently offline, but the core Risk Engine is active.")
 
@@ -102,30 +87,36 @@ if MODEL_FEATURE_IMPORTANCES.sum() > 0:
 @st.cache_data(show_spinner=False)
 def compute_shap_values(monthly_income: float, loan_amount: float, age: int):
     """
-    Compute SHAP values using TreeExplainer (optimized for Random Forest).
+    Compute SHAP values using the cached explainer.
     
     Cache key: monthly_income, loan_amount, age
     This ensures SHAP values are recomputed only when these inputs change.
     
-    Memory-safe: Uses TreeExplainer with check_additivity=False
+    Memory-safe: Cached computation prevents redundant calculations
     Returns None if SHAP is not available (shap_enabled=False)
     """
     if not shap_enabled or shap_explainer is None:
         return None
     
     try:
-        # Prepare input features
+        # Prepare input features as a numpy array
         features = np.array([[monthly_income, loan_amount, age]], dtype=float)
         
-        # Compute SHAP values (TreeExplainer is memory-efficient for tree models)
-        shap_values = shap_explainer.shap_values(features)
+        # Compute SHAP values using modern SHAP API
+        # explainer(features) automatically handles binary/multiclass classification
+        shap_values = shap_explainer(features)
         
-        # For binary classification, take positive class SHAP values
+        # Extract values for positive class if returned as list (binary classification)
         if isinstance(shap_values, list):
             shap_values = shap_values[1]  # Positive class (high risk)
+        elif hasattr(shap_values, 'values'):
+            # Handle SHAP Explanation object
+            shap_values = shap_values.values
         
         # Return SHAP values for first (only) sample
-        return shap_values[0] if len(shap_values.shape) > 1 else shap_values
+        if isinstance(shap_values, np.ndarray):
+            return shap_values[0] if len(shap_values.shape) > 1 else shap_values
+        return shap_values
     
     except Exception as e:
         st.warning(f"⚠️ Error computing SHAP values: {e}")
