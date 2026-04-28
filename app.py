@@ -18,6 +18,14 @@ shap_error_message = None
 
 
 @st.cache_resource
+def load_saved_assets():
+    """Load the deployed model from the project root and disable scaler usage."""
+    model_path = os.path.join(os.path.dirname(__file__), "model.joblib")
+    model = joblib.load(model_path)
+    return model, None
+
+
+@st.cache_resource
 def load_model_and_explainer():
     """Load the trained model and initialize SHAP explainer.
     
@@ -31,13 +39,8 @@ def load_model_and_explainer():
         tuple: (model, explainer, error_message) where explainer is initialized for the model
     """
     global shap_enabled, shap_error_message
-    
-    # Try to load from models/ directory first, then fall back to root
-    model_path = Path(__file__).resolve().parent / "models" / "model.joblib"
-    if not model_path.exists():
-        model_path = Path(__file__).resolve().parent / "model.joblib"
-    
-    model = joblib.load(model_path)
+
+    model, scaler = load_saved_assets()
     
     # Initialize SHAP Explainer (automatically optimized for Random Forest)
     explainer = None
@@ -66,11 +69,96 @@ def load_model_and_explainer():
         error_msg = f"SHAP Error ({type(e).__name__}): {str(e)}"
         explainer = None
     
-    return model, explainer, error_msg
+    return model, scaler, explainer, error_msg
 
 
 # Load model and SHAP explainer using the cached function
-model, shap_explainer, shap_error_message = load_model_and_explainer()
+model, scaler, shap_explainer, shap_error_message = load_model_and_explainer()
+scaler = None
+
+
+def prepare_model_features(monthly_income: float, loan_amount: float, age: int) -> np.ndarray:
+    """Prepare raw model features without scaling."""
+    return np.array([[monthly_income, loan_amount, age]], dtype=float)
+
+
+def get_trained_feature_names(model_obj, scaler_obj=None) -> list[str]:
+    """Return feature names in the exact order used during training."""
+    if hasattr(model_obj, "feature_names_in_"):
+        return list(model_obj.feature_names_in_)
+
+    if scaler_obj is not None and hasattr(scaler_obj, "feature_names_in_"):
+        return list(scaler_obj.feature_names_in_)
+
+    if hasattr(model_obj, "named_steps"):
+        for step in model_obj.named_steps.values():
+            if hasattr(step, "feature_names_in_"):
+                return list(step.feature_names_in_)
+
+    if hasattr(model_obj, "estimators_"):
+        for estimator in model_obj.estimators_:
+            if hasattr(estimator, "feature_names_in_"):
+                return list(estimator.feature_names_in_)
+
+    raise ValueError(
+        "Could not determine training feature names from model/scaler. "
+        "Please provide an explicit feature-order list."
+    )
+
+
+def build_user_input_dataframe(user_inputs: dict, model_obj, scaler_obj=None) -> pd.DataFrame:
+    """Create a one-row DataFrame ordered to match model training features."""
+    feature_names = get_trained_feature_names(model_obj, scaler_obj)
+    missing_features = [name for name in feature_names if name not in user_inputs]
+    if missing_features:
+        raise KeyError(f"Missing required feature(s) in user_inputs: {missing_features}")
+
+    ordered_df = pd.DataFrame([user_inputs], columns=feature_names)
+    return ordered_df
+
+
+def compute_real_time_risk_score(user_inputs: dict, model_obj, scaler_obj=None) -> tuple[float, pd.DataFrame]:
+    """Run real model inference from aligned DataFrame and return risk score (0-100)."""
+    aligned_df = build_user_input_dataframe(user_inputs, model_obj, scaler_obj)
+
+    risk_probability = float(model_obj.predict_proba(aligned_df)[0][1])
+    return risk_probability * 100.0, aligned_df
+
+
+def render_real_shap_waterfall(model_obj, scaler_obj, user_input: dict, max_display: int = 12) -> None:
+    """Render a SHAP waterfall chart for the current prediction in Streamlit."""
+    try:
+        import shap
+        from streamlit_shap import st_shap  # type: ignore[reportMissingImports]
+        import matplotlib.pyplot as plt  # type: ignore[reportMissingImports]
+    except Exception as import_error:
+        st.info(f"SHAP waterfall is unavailable because required libraries are missing: {import_error}")
+        return
+
+    try:
+        aligned_df = build_user_input_dataframe(user_input, model_obj, scaler_obj)
+        explainer_input = aligned_df
+
+        explainer = shap.Explainer(model_obj)
+        explanation = explainer(explainer_input)
+
+        st.markdown("**SHAP Waterfall (Current Prediction)**")
+        st.caption("Feature-level contribution of the current applicant to the predicted risk probability.")
+
+        waterfall_figure = plt.figure(figsize=(10, 5.5))
+        shap.plots.waterfall(explanation[0], max_display=max_display, show=False)
+        st.pyplot(waterfall_figure, clear_figure=True, use_container_width=True)
+
+        # streamlit_shap usage for richer SHAP JS rendering support in Streamlit.
+        force_plot = shap.force_plot(
+            explanation.base_values[0] if np.ndim(explanation.base_values) > 0 else explanation.base_values,
+            explanation.values[0],
+            explainer_input.iloc[0],
+            matplotlib=False,
+        )
+        st_shap(force_plot, height=220)
+    except Exception as shap_error:
+        st.warning(f"Unable to generate SHAP waterfall for current prediction: {shap_error}")
 
 # Display error details if SHAP is unavailable (shown at app startup for debugging)
 if not shap_enabled and shap_error_message:
@@ -100,8 +188,8 @@ def compute_shap_values(monthly_income: float, loan_amount: float, age: int):
         return None
     
     try:
-        # Prepare input features as a numpy array
-        features = np.array([[monthly_income, loan_amount, age]], dtype=float)
+        # Keep SHAP input aligned with inference preprocessing.
+        features = prepare_model_features(monthly_income, loan_amount, age)
         
         # Compute SHAP values using modern SHAP API
         # explainer(features) automatically handles binary/multiclass classification
@@ -470,7 +558,7 @@ with st.sidebar:
 
 
 def predict_risk_score(monthly_income: int, loan_amount: float, age: int) -> float:
-    features = np.array([[monthly_income, loan_amount, age]], dtype=float)
+    features = prepare_model_features(monthly_income, loan_amount, age)
     return float(model.predict_proba(features)[0][1] * 100)
 
 
@@ -594,7 +682,7 @@ class LoanOrchestratorAgent:
                 dti_ratio=dti_ratio,
             )
 
-        features = np.array([[monthly_income, loan_amount, age]], dtype=float)
+        features = prepare_model_features(monthly_income, loan_amount, age)
         model_score = float(self.random_forest_model.predict_proba(features)[0][1] * 100)
 
         if model_score < 30:
@@ -1428,6 +1516,29 @@ applicant_frame = pd.DataFrame(
 )
 engineered_applicant = add_feature_engineering(applicant_frame).iloc[0]
 
+# Real model inference from aligned feature DataFrame (replaces simulated scoring logic).
+real_time_model_inputs = {
+    "Monthly_Income": float(monthly_income),
+    "Loan_Amount": float(loan_amount),
+    "Age": int(applicant_age),
+    "Primary_Income_Source": primary_income_source,
+    "Essential_Expenses": float(essential_expenses),
+    "Monthly_Installment": float(monthly_installment),
+    "Remittance_Status": int(remittance_status),
+    "Land_Area": float(land_area),
+    "CIB_Score": float(cib_score_input if st.session_state.cib_verified else 0),
+    "Stress_Tested_Income": float(engineered_applicant.get("Stress_Tested_Income", stress_tested_monthly_income)),
+    "Loan_Coverage_Ratio": float(engineered_applicant.get("Loan_Coverage_Ratio", 0.0)),
+}
+
+real_time_risk_score = None
+aligned_input_df = pd.DataFrame()
+real_time_inference_error = None
+try:
+    real_time_risk_score, aligned_input_df = compute_real_time_risk_score(real_time_model_inputs, model, scaler)
+except Exception as inference_error:
+    real_time_inference_error = str(inference_error)
+
 # Run model assessment
 cib_score = cib_score_input if st.session_state.cib_verified else 0
 annual_income = monthly_income * 12
@@ -1607,6 +1718,16 @@ with tab_ai:
         delta=f"{boosted_risk_score - initial_risk_score:+.1f} pts",
         help="Alternative-data adjusted score for borderline risk band (40-70).",
     )
+    if real_time_risk_score is not None:
+        st.metric(
+            "Real-Time Risk Score",
+            f"{real_time_risk_score:.1f}/100",
+            help="Direct model inference from aligned raw inputs via model.predict_proba().",
+        )
+    else:
+        st.metric("Real-Time Risk Score", "Unavailable")
+        if real_time_inference_error:
+            st.warning(f"Real-time model inference failed: {real_time_inference_error}")
 
     st.markdown('<div class="panel-card" style="margin-top: 1rem;">', unsafe_allow_html=True)
     st.subheader("Remittance Shock Migration Analysis")
@@ -1679,7 +1800,8 @@ with tab_ai:
             st.warning(assessment["reason"])
             st.info(assessment["suggested_next_step"])
         else:
-            st.metric("Risk Score", f"{assessment['score']:.1f}/100")
+            display_score = real_time_risk_score if real_time_risk_score is not None else float(assessment["score"])
+            st.metric("Real-Time Risk Score", f"{display_score:.1f}/100")
             st.metric("Model Confidence", f"{assessment['confidence']:.1f}%")
             band_color = RED if assessment["band"] == "HIGH" else BLUE if assessment["band"] == "LOW" else "#8a6400"
             st.markdown(
@@ -1724,6 +1846,14 @@ with tab_ai:
                     unsafe_allow_html=True,
                 )
                 st.caption("XAI Engine: Dynamic Feature Importance (Random Forest v1.4). Interpretation is model-driven, not rule-based.")
+                show_shap_waterfall = st.toggle(
+                    "Show SHAP Waterfall",
+                    value=False,
+                    help="Enable to render detailed SHAP waterfall and force plots for the current prediction.",
+                    key="show_shap_waterfall_plot",
+                )
+                if show_shap_waterfall:
+                    render_real_shap_waterfall(model, scaler, real_time_model_inputs)
                 risk_score = assessment["score"]
                 top_shap_rows = assessment["contribution_table"].head(3)
                 top_shap_pairs = [
