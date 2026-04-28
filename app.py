@@ -2,6 +2,7 @@ from pathlib import Path
 import base64
 import math
 import time
+import os
 
 import joblib
 import numpy as np
@@ -408,7 +409,11 @@ st.markdown(
 # Sidebar: Economic Stress Testing
 with st.sidebar:
     # Logo and branding at top
-    st.image(str(LOGO_PATH), width=200, use_container_width=True)
+    logo_path = os.path.join(os.path.dirname(__file__), 'assets', 'logo.png')
+    if os.path.exists(logo_path):
+        st.image(str(LOGO_PATH), width=200, use_container_width=True)
+    else:
+        st.sidebar.title('Global IME Bank')
     st.caption("Official Credit Assessment Tool")
     st.divider()
     
