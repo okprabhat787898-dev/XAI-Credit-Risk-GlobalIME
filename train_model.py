@@ -44,11 +44,16 @@ def main() -> None:
 	output_path = Path("model.joblib")
 	joblib.dump(model, output_path)
 
+	# Save training features for memory-efficient SHAP background data
+	X_train_path = Path("X_train.joblib")
+	joblib.dump(features, X_train_path)
+
 	reports_dir = Path("reports")
 	reports_dir.mkdir(exist_ok=True)
 	engineered_frame.to_csv(reports_dir / "training_engineered_features.csv", index=False)
 
 	print("Model ready!")
+	print(f"Training features saved to {X_train_path} for SHAP background data.")
 
 
 if __name__ == "__main__":
