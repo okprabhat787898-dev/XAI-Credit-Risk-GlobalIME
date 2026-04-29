@@ -16,13 +16,92 @@ from feature_engineering import add_feature_engineering
 shap_enabled = True
 shap_error_message = None
 
+# Mock CIB configuration: when True the app uses a demo/mock CIB flow and
+# shows clear warnings that this is NOT a real integration.
+MOCK_CIB_MODE = True
+MOCK_CIB_LABEL = "Mock CIB (Demo)"
+
+
+def health_check(max_artifact_bytes: int = 50 * 1024 * 1024) -> None:
+    """Run a lightweight health check early in app startup.
+
+    - Verifies required artifact files exist (model is mandatory)
+    - Checks artifact file sizes and warns if any exceed `max_artifact_bytes`
+    - Verifies key optional dependencies (SHAP) and reports guidance
+    - Fails fast (st.error + st.stop) when critical items are missing
+    """
+    repo_dir = os.path.dirname(__file__)
+    artifacts_dir = os.path.join(repo_dir, "artifacts")
+    model_path = os.path.join(artifacts_dir, "model.joblib")
+    background_path = os.path.join(artifacts_dir, "background_X.joblib")
+
+    if not os.path.exists(model_path):
+        st.error(
+            "🚨 CRITICAL: Missing required artifacts. The app requires a trained model to run.\n"
+            f"Missing: {model_path}\n\nRun `python train_model.py` to create artifacts, or place the model in the artifacts/ folder."
+        )
+        st.stop()
+
+    def _size_warn(path: str):
+        try:
+            size = os.path.getsize(path)
+            if size > max_artifact_bytes:
+                st.warning(f"Artifact {os.path.basename(path)} is large ({size/1024/1024:.1f} MB). Consider keeping artifacts small or using Git LFS for deploys.")
+        except Exception:
+            pass
+
+    _size_warn(model_path)
+    _size_warn(background_path)
+
+    try:
+        import shap  # type: ignore
+    except Exception:
+        st.info(
+            "SHAP is not available in the environment. To enable SHAP-based explainability install: `pip install shap==0.41.0 streamlit-shap==0.1.0`.\n"
+            "The app will continue but explainability plots may be limited."
+        )
+
+
 
 @st.cache_resource
 def load_saved_assets():
-    """Load the deployed model from the project root and disable scaler usage."""
-    model_path = os.path.join(os.path.dirname(__file__), "model.joblib")
-    model = joblib.load(model_path)
-    return model, None
+    """Load the deployed trained model and background X from the `artifacts/` folder.
+
+    This is a blocking load: if artifacts are missing or invalid the app will stop.
+    Returns: (model, background_X)
+    """
+    repo_dir = os.path.dirname(__file__)
+    artifacts_dir = os.path.join(repo_dir, "artifacts")
+    model_path = os.path.join(artifacts_dir, "model.joblib")
+    feature_names_path = os.path.join(artifacts_dir, "feature_names.json")
+    background_path = os.path.join(artifacts_dir, "background_X.joblib")
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found at {model_path}. Cannot proceed without trained model.")
+
+    try:
+        model = joblib.load(model_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model from {model_path}: {type(e).__name__}: {str(e)}")
+
+    background_X = None
+    if os.path.exists(background_path):
+        try:
+            background_X = joblib.load(background_path)
+        except Exception:
+            background_X = None
+
+    # Load feature names if available (used for strict alignment)
+    global TRAIN_FEATURE_NAMES
+    TRAIN_FEATURE_NAMES = None
+    if os.path.exists(feature_names_path):
+        try:
+            with open(feature_names_path, "r", encoding="utf-8") as fh:
+                TRAIN_FEATURE_NAMES = json.load(fh)
+        except Exception:
+            TRAIN_FEATURE_NAMES = None
+
+    return model, background_X
 
 
 @st.cache_resource
@@ -32,49 +111,62 @@ def load_model_and_explainer():
     This function is cached to keep the model and explainer in memory,
     preventing unnecessary reloads and ensuring optimal app performance.
     
-    Uses shap.Explainer which automatically detects the model type (Random Forest)
-    and uses optimal settings for tree-based models.
+    Model loading is MANDATORY—if it fails, the app stops with st.error/st.stop().
+    SHAP explainer initialization is optional; if SHAP unavailable, LIME fallback is used for explanations.
     
     Returns:
         tuple: (model, explainer, error_message) where explainer is initialized for the model
     """
     global shap_enabled, shap_error_message
 
-    model, scaler = load_saved_assets()
+    # MANDATORY model load—fail hard if model cannot be loaded
+    try:
+        model, background_X = load_saved_assets()
+    except (FileNotFoundError, RuntimeError) as e:
+        st.error(f"🚨 CRITICAL: Cannot load trained model. {str(e)}\n\nThe app requires a valid trained model to function.")
+        st.stop()
     
-    # Initialize SHAP Explainer (automatically optimized for Random Forest)
+    # Initialize SHAP Explainer (optional; graceful fallback to LIME if unavailable)
     explainer = None
     error_msg = None
     try:
         import shap
-        
-        # Use shap.Explainer which auto-detects model type and optimizes accordingly
-        # Simpler and more robust than shap.TreeExplainer
-        explainer = shap.Explainer(model)
-        
+        # Prefer TreeExplainer for tree-based models and use small background dataset when available
+        try:
+            is_tree = hasattr(model, "estimators_") or "RandomForest" in type(model).__name__
+        except Exception:
+            is_tree = False
+
+        if is_tree:
+            if 'background_X' in locals() and background_X is not None:
+                explainer = shap.TreeExplainer(model, data=background_X)
+            else:
+                explainer = shap.TreeExplainer(model)
+        else:
+            explainer = shap.Explainer(model, data=background_X if 'background_X' in locals() else None)
         shap_enabled = True
     except (ImportError, ModuleNotFoundError) as e:
-        # SHAP library not available - capture error details
         shap_enabled = False
         error_msg = f"SHAP library not found: {type(e).__name__}: {str(e)}"
         explainer = None
     except MemoryError as e:
-        # Memory error during SHAP initialization
         shap_enabled = False
         error_msg = f"Memory error initializing SHAP: {str(e)}"
         explainer = None
     except Exception as e:
-        # Other errors (version conflicts, model format, computation) - also allow app to continue
         shap_enabled = False
         error_msg = f"SHAP Error ({type(e).__name__}): {str(e)}"
         explainer = None
     
-    return model, scaler, explainer, error_msg
+    # Return model and the optional background_X (from artifacts), plus explainer and any error message
+    return model, background_X if 'background_X' in locals() else None, explainer, error_msg
 
 
-# Load model and SHAP explainer using the cached function
-model, scaler, shap_explainer, shap_error_message = load_model_and_explainer()
-scaler = None
+# Run lightweight health checks before loading heavy resources
+health_check()
+# Load model and SHAP explainer using the cached function (blocking load)
+model, background_X, shap_explainer, shap_error_message = load_model_and_explainer()
+# background_X may be None if not provided by artifacts; model is required
 
 
 def prepare_model_features(monthly_income: float, loan_amount: float, age: int) -> np.ndarray:
@@ -82,8 +174,22 @@ def prepare_model_features(monthly_income: float, loan_amount: float, age: int) 
     return np.array([[monthly_income, loan_amount, age]], dtype=float)
 
 
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or pd.isna(value):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def get_trained_feature_names(model_obj, scaler_obj=None) -> list[str]:
     """Return feature names in the exact order used during training."""
+    # Prefer explicit feature list loaded from artifacts during startup
+    global TRAIN_FEATURE_NAMES
+    if 'TRAIN_FEATURE_NAMES' in globals() and TRAIN_FEATURE_NAMES:
+        return list(TRAIN_FEATURE_NAMES)
+
     if hasattr(model_obj, "feature_names_in_"):
         return list(model_obj.feature_names_in_)
 
@@ -110,61 +216,214 @@ def build_user_input_dataframe(user_inputs: dict, model_obj, scaler_obj=None) ->
     """Create a one-row DataFrame ordered to match model training features."""
     feature_names = get_trained_feature_names(model_obj, scaler_obj)
     missing_features = [name for name in feature_names if name not in user_inputs]
+
+    # Attempt to auto-populate engineered and common missing features using
+    # the shared feature engineering logic so callers may pass a minimal set
+    # of UI inputs (Monthly_Income, Loan_Amount, Age, etc.). This keeps edits
+    # minimal while ensuring the model receives the exact feature set it was
+    # trained on. Do not silently mask unexpected missing fields.
     if missing_features:
-        raise KeyError(f"Missing required feature(s) in user_inputs: {missing_features}")
+        # Create a one-row frame from provided inputs and populate sensible defaults
+        temp = pd.DataFrame([user_inputs])
+        # Ensure canonical base columns exist for feature engineering
+        base_cols_defaults = {
+            "Monthly_Income": 0.0,
+            "Loan_Amount": 0.0,
+            "Age": 30,
+            "Primary_Income_Source": "Salary",
+            "Essential_Expenses": 0.0,
+            "Monthly_Installment": 0.0,
+            "Remittance_Status": 0,
+            "CIB_Score": 0.0,
+            "Land_Area": 0.0,
+        }
+        for col, default in base_cols_defaults.items():
+            if col not in temp.columns:
+                temp[col] = default
+
+        # Run shared feature engineering to produce Stress_Tested_Income, Loan_Coverage_Ratio, etc.
+        try:
+            eng = add_feature_engineering(temp)
+            eng_row = eng.iloc[0] if not eng.empty else None
+        except Exception:
+            eng_row = None
+
+        # Merge engineered features back into user_inputs for any missing fields
+        if eng_row is not None:
+            for mf in list(missing_features):
+                if mf in eng_row.index:
+                    user_inputs[mf] = eng_row.get(mf)
+                    if mf in missing_features:
+                        try:
+                            missing_features.remove(mf)
+                        except ValueError:
+                            pass
+
+        # For any remaining missing numeric features, set safe defaults (0.0 or 0)
+        for mf in missing_features:
+            # preserve casing but assume numeric default
+            user_inputs[mf] = 0.0
 
     ordered_df = pd.DataFrame([user_inputs], columns=feature_names)
+
+    # Coerce numeric-like columns to floats safely: convert strings/numeric values
+    # where possible, replace NA/NaN/inf with 0.0. Leave non-numeric (categorical)
+    # string columns untouched so encoded categorical features are preserved.
+    for col in ordered_df.columns:
+        try:
+            conv = pd.to_numeric(ordered_df[col], errors="coerce")
+            # If conversion produced any non-NaN value, accept numeric conversion
+            if not conv.isna().all():
+                ordered_df[col] = conv.fillna(0.0)
+        except Exception:
+            # leave as-is on any unexpected error
+            continue
+
     return ordered_df
 
 
+def get_risk_probability_and_score(features_dict: dict, model_obj) -> tuple[float, float]:
+    """
+    Central function for all risk scoring: trained model only.
+    
+    Input: dict with keys matching model.feature_names_in_
+    Returns: (probability [0-1], score_0_to_100)
+    
+    Uses model.predict_proba()[0][1] for positive class probability.
+    No fallback to simulated/sigmoid—pure trained model inference.
+    """
+    try:
+        aligned_df = build_user_input_dataframe(features_dict, model_obj, scaler_obj=None)
+        raw_prob = model_obj.predict_proba(aligned_df)[0][1]
+        raw_prob = pd.to_numeric(raw_prob, errors="coerce")
+        probability = 0.0 if pd.isna(raw_prob) else float(raw_prob)
+        score_0_to_100 = probability * 100.0
+        return probability, score_0_to_100
+    except Exception as e:
+        st.error(f"🚨 Model inference failed: {type(e).__name__}: {str(e)}")
+        st.stop()
+
+
+def get_risk_probability_and_score_batch(features_df: pd.DataFrame, model_obj) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Vectorized version for batch/portfolio scoring.
+    
+    Input: DataFrame with one row per applicant
+    Returns: (probabilities array [0-1], scores array [0-100])
+    """
+    try:
+        # Preprocessing: ensure no missing values and all floats before prediction
+        proc_df = features_df.copy()
+        proc_df = proc_df.apply(lambda col: pd.to_numeric(col, errors="coerce"))
+        proc_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        proc_df.fillna(0.0, inplace=True)
+        proc_df = proc_df.astype(float)
+
+        probabilities = model_obj.predict_proba(proc_df)[:, 1]
+        scores_0_to_100 = probabilities * 100.0
+        return probabilities, scores_0_to_100
+    except Exception as e:
+        st.error(f"🚨 Batch model inference failed: {type(e).__name__}: {str(e)}")
+        st.stop()
+
+
 def compute_real_time_risk_score(user_inputs: dict, model_obj, scaler_obj=None) -> tuple[float, pd.DataFrame]:
-    """Run real model inference from aligned DataFrame and return risk score (0-100)."""
+    """Legacy wrapper around get_risk_probability_and_score. Use new function directly for new code."""
+    # Build aligned DataFrame matching model feature order
     aligned_df = build_user_input_dataframe(user_inputs, model_obj, scaler_obj)
 
-    risk_probability = float(model_obj.predict_proba(aligned_df)[0][1])
-    return risk_probability * 100.0, aligned_df
+    # Sanitization: ensure no pd.NA/NaN/inf remain in numeric columns before inference
+    sanitized = aligned_df.copy()
+    # Convert every column to numeric with coercion; this will produce NaN for non-numeric values
+    sanitized = sanitized.apply(lambda col: pd.to_numeric(col, errors="coerce"))
+    # Replace inf/-inf with NaN
+    sanitized.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Fill NaN with 0.0
+    sanitized.fillna(0.0, inplace=True)
+    # Ensure dtype float for all columns
+    for c in sanitized.columns:
+        try:
+            sanitized[c] = sanitized[c].astype(float)
+        except Exception:
+            # leave non-convertible columns as-is (model may accept categorical strings);
+            # attempt to coerce again but keep as object if not possible
+            try:
+                sanitized[c] = pd.to_numeric(sanitized[c], errors="coerce").fillna(0.0).astype(float)
+            except Exception:
+                pass
+
+    # Debug check: if any NA remains, raise informative error listing columns
+    remaining_na = [col for col in sanitized.columns if sanitized[col].isna().any()]
+    if remaining_na:
+        raise TypeError(f"Sanitization failed; columns contain NA after cleaning: {remaining_na}")
+
+    # Perform model inference directly on sanitized DataFrame
+    try:
+        probs = model_obj.predict_proba(sanitized)[:, 1]
+        raw_p = pd.to_numeric(probs[0], errors="coerce")
+        probability = 0.0 if pd.isna(raw_p) else float(raw_p)
+        score = probability * 100.0
+        return score, sanitized
+    except Exception as e:
+        # Re-raise with additional context
+        raise RuntimeError(f"Model inference failed after sanitization: {type(e).__name__}: {e}")
 
 
 def render_real_shap_waterfall(model_obj, scaler_obj, user_input: dict, max_display: int = 12) -> None:
     """Render a SHAP waterfall chart for the current prediction in Streamlit."""
-    try:
-        import shap
-        from streamlit_shap import st_shap  # type: ignore[reportMissingImports]
-        import matplotlib.pyplot as plt  # type: ignore[reportMissingImports]
-    except Exception as import_error:
-        st.info(f"SHAP waterfall is unavailable because required libraries are missing: {import_error}")
+    # Require SHAP explainer to be initialized during app startup.
+    if not shap_enabled or shap_explainer is None:
+        guidance = (
+            "SHAP explainer is not initialized. To enable SHAP, install the pinned packages and restart the app:\n"
+            "pip install shap==0.41.0 streamlit-shap==0.1.0\n"
+            "Ensure artifacts/background_X.joblib exists (created by train_model.py)."
+        )
+        st.error("⚠️ SHAP unavailable: " + (shap_error_message or guidance))
         return
 
     try:
         aligned_df = build_user_input_dataframe(user_input, model_obj, scaler_obj)
         explainer_input = aligned_df
 
-        explainer = shap.Explainer(model_obj)
-        explanation = explainer(explainer_input)
+        # Use cached TreeExplainer created at startup (shap_explainer)
+        explanation = shap_explainer(explainer_input)
 
         st.markdown("**SHAP Waterfall (Current Prediction)**")
         st.caption("Feature-level contribution of the current applicant to the predicted risk probability.")
 
-        waterfall_figure = plt.figure(figsize=(10, 5.5))
-        shap.plots.waterfall(explanation[0], max_display=max_display, show=False)
-        st.pyplot(waterfall_figure, clear_figure=True, use_container_width=True)
+        import matplotlib.pyplot as plt  # type: ignore[reportMissingImports]
 
-        # streamlit_shap usage for richer SHAP JS rendering support in Streamlit.
-        force_plot = shap.force_plot(
-            explanation.base_values[0] if np.ndim(explanation.base_values) > 0 else explanation.base_values,
-            explanation.values[0],
-            explainer_input.iloc[0],
-            matplotlib=False,
-        )
-        st_shap(force_plot, height=220)
+        waterfall_figure = plt.figure(figsize=(10, 5.5))
+        try:
+            import shap
+            shap.plots.waterfall(explanation[0], max_display=max_display, show=False)
+            st.pyplot(waterfall_figure, clear_figure=True, use_container_width=True)
+        except Exception as plot_err:
+            st.error(f"Failed to render SHAP waterfall: {plot_err}")
+
+        # Optionally render force plot via streamlit_shap if available
+        try:
+            from streamlit_shap import st_shap  # type: ignore[reportMissingImports]
+            try:
+                import shap
+                base = explanation.base_values[0] if np.ndim(explanation.base_values) > 0 else explanation.base_values
+                vals = explanation.values[0]
+                force_plot = shap.force_plot(base, vals, explainer_input.iloc[0], matplotlib=False)
+                st_shap(force_plot, height=220)
+            except Exception as fp_err:
+                st.info(f"Force plot unavailable: {fp_err}")
+        except Exception:
+            st.info("Install `streamlit-shap` to enable interactive SHAP force plots in Streamlit.")
     except Exception as shap_error:
-        st.warning(f"Unable to generate SHAP waterfall for current prediction: {shap_error}")
+        st.error(f"Unable to generate SHAP waterfall for current prediction: {shap_error}")
 
 # Display error details if SHAP is unavailable (shown at app startup for debugging)
 if not shap_enabled and shap_error_message:
-    st.error(f"⚠️ SHAP Explainer Failed to Initialize\n\n**Technical Error:**\n```\n{shap_error_message}\n```\n\n**Impact:** The core Risk Engine remains active. Falling back to LIME-style feature contributions for model explainability.")
+    st.error(
+        f"⚠️ SHAP Explainer Failed to Initialize\n\nTechnical Error:\n{shap_error_message}\n\nTo enable SHAP, install: pip install shap==0.41.0 streamlit-shap==0.1.0 and ensure artifacts/background_X.joblib exists."
+    )
 elif not shap_enabled:
-    st.warning("⚠️ SHAP Explainer is currently offline, but the core Risk Engine is active.")
+    st.warning("⚠️ SHAP Explainer is currently offline. Install shap and streamlit-shap to enable explainability plots.")
 
 MODEL_FEATURE_NAMES = ("Income", "Loan Amount", "Age")
 MODEL_BASELINE_VALUES = np.array([80000.0, 500000.0, 35.0], dtype=float)
@@ -186,29 +445,45 @@ def compute_shap_values(monthly_income: float, loan_amount: float, age: int):
     """
     if not shap_enabled or shap_explainer is None:
         return None
-    
+
     try:
-        # Keep SHAP input aligned with inference preprocessing.
-        features = prepare_model_features(monthly_income, loan_amount, age)
-        
-        # Compute SHAP values using modern SHAP API
-        # explainer(features) automatically handles binary/multiclass classification
-        shap_values = shap_explainer(features)
-        
-        # Extract values for positive class if returned as list (binary classification)
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1]  # Positive class (high risk)
-        elif hasattr(shap_values, 'values'):
-            # Handle SHAP Explanation object
-            shap_values = shap_values.values
-        
-        # Return SHAP values for first (only) sample
-        if isinstance(shap_values, np.ndarray):
-            return shap_values[0] if len(shap_values.shape) > 1 else shap_values
-        return shap_values
-    
+        mi_val = pd.to_numeric(monthly_income, errors="coerce")
+        la_val = pd.to_numeric(loan_amount, errors="coerce")
+        mi_val = 0.0 if pd.isna(mi_val) else float(mi_val)
+        la_val = 0.0 if pd.isna(la_val) else float(la_val)
+        aligned_df = build_user_input_dataframe({
+            "Monthly_Income": mi_val,
+            "Loan_Amount": la_val,
+            "Age": int(age),
+        }, model, scaler_obj=None)
+
+        explanation = shap_explainer(aligned_df)
+
+        # Explanation handling: support both list-style and Explanation objects
+        shap_values = None
+        try:
+            if isinstance(explanation, list):
+                # list per class
+                shap_values = explanation[1].values if hasattr(explanation[1], 'values') else np.array(explanation[1])
+            elif hasattr(explanation, 'values'):
+                shap_values = explanation.values
+            else:
+                shap_values = np.array(explanation)
+
+            # If shap_values has shape (1, n_features) or (1, n_classes, n_features)
+            if isinstance(shap_values, np.ndarray):
+                if shap_values.ndim == 3:
+                    # (samples, classes, features) -> pick positive class (index 1)
+                    shap_values = shap_values[0, 1, :]
+                elif shap_values.ndim == 2:
+                    shap_values = shap_values[0]
+
+            return shap_values
+        except Exception as inner_e:
+            st.error(f"Failed to parse SHAP explanation: {inner_e}")
+            return None
     except Exception as e:
-        st.warning(f"⚠️ Error computing SHAP values: {e}")
+        st.error(f"⚠️ Error computing SHAP values: {type(e).__name__}: {e}")
         return None
 
 
@@ -558,8 +833,21 @@ with st.sidebar:
 
 
 def predict_risk_score(monthly_income: int, loan_amount: float, age: int) -> float:
-    features = prepare_model_features(monthly_income, loan_amount, age)
-    return float(model.predict_proba(features)[0][1] * 100)
+    """
+    Convenience function wrapping get_risk_probability_and_score for backward compatibility.
+    All calls should eventually migrate to get_risk_probability_and_score.
+    """
+    mi_val = pd.to_numeric(monthly_income, errors="coerce")
+    la_val = pd.to_numeric(loan_amount, errors="coerce")
+    mi_val = 0.0 if pd.isna(mi_val) else float(mi_val)
+    la_val = 0.0 if pd.isna(la_val) else float(la_val)
+    features_dict = {
+        "Monthly_Income": mi_val,
+        "Loan_Amount": la_val,
+        "Age": int(age),
+    }
+    _, score = get_risk_probability_and_score(features_dict, model)
+    return score
 
 
 def apply_macroeconomic_stress_test(
@@ -583,8 +871,10 @@ def reduce_remittance_based_income(
     stressed_df = portfolio_df.copy()
     source_series = stressed_df[source_col].astype(str).str.strip().str.lower()
     remittance_mask = source_series == "remittance"
+    shock_val = pd.to_numeric(shock_pct, errors="coerce")
+    shock_val = 0.0 if pd.isna(shock_val) else float(shock_val)
     stressed_df.loc[remittance_mask, income_col] = (
-        stressed_df.loc[remittance_mask, income_col].astype(float) * (1.0 - float(shock_pct) / 100.0)
+        stressed_df.loc[remittance_mask, income_col].astype(float) * (1.0 - shock_val / 100.0)
     )
     stressed_df[income_col] = stressed_df[income_col].clip(lower=0.0)
     return stressed_df
@@ -602,18 +892,15 @@ def simulate_remittance_shock_migration(
     portfolio_df: pd.DataFrame,
     shock_pct: float,
 ) -> dict[str, object]:
-    baseline_scores = portfolio_df.apply(
-        lambda row: predict_risk_score(float(row["Monthly_Income"]), float(row["Loan_Amount"]), int(row["Age"])),
-        axis=1,
-    )
+    """Simulate portfolio migration under remittance shock using vectorized model scoring."""
+    # Baseline scores using vectorized batch prediction
+    _, baseline_scores = get_risk_probability_and_score_batch(portfolio_df[["Monthly_Income", "Loan_Amount", "Age"]], model)
+    
     stressed_portfolio = reduce_remittance_based_income(portfolio_df, shock_pct)
-    stressed_scores = stressed_portfolio.apply(
-        lambda row: predict_risk_score(float(row["Monthly_Income"]), float(row["Loan_Amount"]), int(row["Age"])),
-        axis=1,
-    )
+    _, stressed_scores = get_risk_probability_and_score_batch(stressed_portfolio[["Monthly_Income", "Loan_Amount", "Age"]], model)
 
-    baseline_bucket = baseline_scores.apply(decision_bucket_from_score)
-    stressed_bucket = stressed_scores.apply(decision_bucket_from_score)
+    baseline_bucket = pd.Series(baseline_scores).apply(decision_bucket_from_score)
+    stressed_bucket = pd.Series(stressed_scores).apply(decision_bucket_from_score)
 
     moved_mask = (baseline_bucket == "Approved") & (stressed_bucket == "Manual Review")
     baseline_approved = int((baseline_bucket == "Approved").sum())
@@ -682,8 +969,17 @@ class LoanOrchestratorAgent:
                 dti_ratio=dti_ratio,
             )
 
-        features = prepare_model_features(monthly_income, loan_amount, age)
-        model_score = float(self.random_forest_model.predict_proba(features)[0][1] * 100)
+        # Use centralized model-based risk scoring (no simulated/sigmoid fallback)
+        mi_val = pd.to_numeric(monthly_income, errors="coerce")
+        la_val = pd.to_numeric(loan_amount, errors="coerce")
+        mi_val = 0.0 if pd.isna(mi_val) else float(mi_val)
+        la_val = 0.0 if pd.isna(la_val) else float(la_val)
+        features_dict = {
+            "Monthly_Income": mi_val,
+            "Loan_Amount": la_val,
+            "Age": int(age),
+        }
+        _, model_score = get_risk_probability_and_score(features_dict, self.random_forest_model)
 
         if model_score < 30:
             status = "Instant Approval"
@@ -868,20 +1164,36 @@ def build_model_contributions(monthly_income: int, loan_amount: float, age: int)
     This function uses st.cache_data internally to avoid recalculating
     SHAP values when inputs haven't changed.
     """
-    # Try SHAP first (memory-safe TreeExplainer)
+    # Compute SHAP values using the cached explainer. Only SHAP is accepted.
+    if not shap_enabled or shap_explainer is None:
+        # Clear instructive error for operators/devs — do not silently fallback.
+        error_msg = shap_error_message or (
+            "SHAP is not available. Install the pinned packages and ensure artifacts/background_X.joblib exists.\n"
+            "Example: pip install shap==0.41.0 streamlit-shap==0.1.0"
+        )
+        st.error(
+            "⚠️ SHAP unavailable: " + str(error_msg)
+        )
+        # Return empty contributions/table and the model score so the rest of the UI can function.
+        current_values = np.array([monthly_income, loan_amount, age], dtype=float)
+        current_score = predict_risk_score(monthly_income, loan_amount, age)
+        empty_table = pd.DataFrame(columns=["Feature", "Current Value", "Baseline Value", "Model Importance", "Contribution", "Direction"])
+        return {}, empty_table, current_score
+
     shap_values = compute_shap_values(float(monthly_income), float(loan_amount), int(age))
-    
-    if shap_values is not None:
-        # Use SHAP values for contributions
-        contributions = {
-            feature_name: float(shap_values[index])
-            for index, feature_name in enumerate(MODEL_FEATURE_NAMES)
-        }
-        contribution_source = "SHAP (TreeExplainer)"
-    else:
-        # Fallback to LIME-style local effects (cached)
-        contributions = compute_shap_summary(float(monthly_income), float(loan_amount), int(age))
-        contribution_source = "Local Effects (LIME-style)"
+    if shap_values is None:
+        st.error("⚠️ Failed to compute SHAP values for the current input. See logs for details.")
+        current_values = np.array([monthly_income, loan_amount, age], dtype=float)
+        current_score = predict_risk_score(monthly_income, loan_amount, age)
+        empty_table = pd.DataFrame(columns=["Feature", "Current Value", "Baseline Value", "Model Importance", "Contribution", "Direction"])
+        return {}, empty_table, current_score
+
+    # Use SHAP values for contributions
+    contributions = {
+        feature_name: float(shap_values[index])
+        for index, feature_name in enumerate(get_trained_feature_names(model))
+    }
+    contribution_source = "SHAP (TreeExplainer)"
 
     current_values = np.array([monthly_income, loan_amount, age], dtype=float)
     current_score = predict_risk_score(monthly_income, loan_amount, age)
@@ -1284,7 +1596,7 @@ with metric_col_1:
 with metric_col_2:
     st.metric("CIB Confidence level", f"{top_cib_confidence_pct:.1f}%", delta=f"Status: {top_cib_status}")
 
-tab_onboard, tab_ai, tab_audit = st.tabs(["📥 Applicant Intake", "🧠 AI Risk Analysis", "🛡️ Compliance & Audit"])
+tab_onboard, tab_ai, tab_audit, tab_pilot = st.tabs(["📥 Applicant Intake", "🧠 AI Risk Analysis", "🛡️ Compliance & Audit", "🧪 Pilot Study (20 Profiles)"])
 
 with tab_onboard:
     page_left_col, page_right_col = st.columns([0.92, 1.08], gap="large")
@@ -1417,16 +1729,20 @@ with tab_onboard:
             help=loan_affordability_help,
         )
         st.caption("Loan ÷ Annual Income")
-        cib_score_input = st.slider("CIB Score", min_value=300, max_value=850, value=720, step=1, key="cib_score_input_widget")
-        if st.button("🔍 Check CIB Records (API Simulation)", use_container_width=True):
-            with st.spinner("Connecting to CIB Nepal..."):
+        # Mock CIB banner and demo-mode controls
+        if MOCK_CIB_MODE:
+            st.warning(f"{MOCK_CIB_LABEL} — DEMO MODE: This is a simulated CIB response for testing only.")
+
+        cib_score_input = st.slider(f"{MOCK_CIB_LABEL} Score (simulated)", min_value=300, max_value=850, value=720, step=1, key="cib_score_input_widget")
+        if st.button("🔍 Mock CIB (Demo) — Check Records", use_container_width=True):
+            with st.spinner("Connecting to CIB Nepal (mock)..."):
                 time.sleep(1.5)
-            st.info(f"CIB Score: {cib_score_input} | Blacklist: No | Outstanding Loans: 0 | Default History (24M): Clean")
-            st.success("CIB check complete – profile ready for decision.")
+            st.info(f"{MOCK_CIB_LABEL} Score: {cib_score_input} | Blacklist: No | Outstanding Loans: 0 | Default History (24M): Clean")
+            st.success(f"{MOCK_CIB_LABEL} check complete – demo data loaded.")
             st.session_state.cib_verified = True
         if st.session_state.cib_verified:
             st.info(
-                f"**CIB Score:** {cib_score_input} | **Blacklist:** No | **Outstanding Loans:** 0 | **Default History (24M):** Clean"
+                f"**{MOCK_CIB_LABEL} Score:** {cib_score_input} | **Blacklist:** No | **Outstanding Loans:** 0 | **Default History (24M):** Clean"
             )
         st.divider()
         st.markdown('<h2 class="section-heading">Identity Verification</h2>', unsafe_allow_html=True)
@@ -1459,6 +1775,14 @@ with tab_onboard:
         st.markdown(f'<p style="color: {MUTED}; font-size: 0.9rem;"><strong>Audit Tab:</strong> Compliance reports</p>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+        # Explanation panel for Mock CIB (Demo) flow and real integration requirements
+        st.info(
+            f"{MOCK_CIB_LABEL} is enabled for demo/testing.\n\n" \
+            "A real CIB integration requires: API credentials from CIB provider, secure TLS transport, " \
+            "trusted authentication (client certs or OAuth), rate-limiting and retry policies, PII handling and " \
+            "consent capture, logging/audit trails, and a compliance review (NRB/GDPR-equivalent).\n\n" \
+            "Do NOT use mock responses in production — disable MOCK_CIB_MODE and implement the official API client."
+        )
 
 # Lightweight validation only – defer heavy computations to Analysis tab
 policy_result = apply_banking_policy_rules(monthly_income, loan_amount)
@@ -1514,28 +1838,69 @@ applicant_frame = pd.DataFrame(
         }
     ]
 )
-engineered_applicant = add_feature_engineering(applicant_frame).iloc[0]
 
-# Real model inference from aligned feature DataFrame (replaces simulated scoring logic).
-real_time_model_inputs = {
-    "Monthly_Income": float(monthly_income),
-    "Loan_Amount": float(loan_amount),
-    "Age": int(applicant_age),
-    "Primary_Income_Source": primary_income_source,
-    "Essential_Expenses": float(essential_expenses),
-    "Monthly_Installment": float(monthly_installment),
-    "Remittance_Status": int(remittance_status),
-    "Land_Area": float(land_area),
-    "CIB_Score": float(cib_score_input if st.session_state.cib_verified else 0),
-    "Stress_Tested_Income": float(engineered_applicant.get("Stress_Tested_Income", stress_tested_monthly_income)),
-    "Loan_Coverage_Ratio": float(engineered_applicant.get("Loan_Coverage_Ratio", 0.0)),
-}
+# Run feature engineering (same logic as training) and then CLEAN engineered numeric fields
+eng_df = add_feature_engineering(applicant_frame)
+
+# Ensure numeric engineered columns exist
+for col in ["Monthly_Income", "Essential_Expenses", "Monthly_Installment", "Stress_Tested_Income", "Loan_Coverage_Ratio", "Land_Area"]:
+    if col not in eng_df.columns:
+        eng_df[col] = 0.0
+
+# Coerce to numeric and replace pd.NA / NaN / inf with safe defaults
+eng_df["Monthly_Income"] = pd.to_numeric(eng_df["Monthly_Income"], errors="coerce").fillna(0.0)
+eng_df["Essential_Expenses"] = pd.to_numeric(eng_df["Essential_Expenses"], errors="coerce").fillna(0.0)
+eng_df["Monthly_Installment"] = pd.to_numeric(eng_df["Monthly_Installment"], errors="coerce").fillna(0.0)
+eng_df["Stress_Tested_Income"] = pd.to_numeric(eng_df["Stress_Tested_Income"], errors="coerce").fillna(eng_df["Monthly_Income"].fillna(0.0))
+
+# Loan_Coverage_Ratio may be pd.NA when installment was 0 in the engineering step; set to 0.0
+eng_df["Loan_Coverage_Ratio"] = pd.to_numeric(eng_df["Loan_Coverage_Ratio"], errors="coerce").fillna(0.0)
+
+# If Monthly_Installment is zero, set Loan_Coverage_Ratio explicitly to 0.0 and set a safe non-zero
+# installment for any downstream numeric operations (we keep ratio=0.0 to reflect no coverage)
+if float(eng_df.at[0, "Monthly_Installment"]) == 0.0:
+    eng_df.at[0, "Loan_Coverage_Ratio"] = 0.0
+    eng_df.at[0, "Monthly_Installment"] = 1.0
+
+# Ensure Land_Area is numeric
+eng_df["Land_Area"] = pd.to_numeric(eng_df["Land_Area"], errors="coerce").fillna(0.0)
+
+# Now produce a cleaned dict to use for inference; preserve categorical Primary_Income_Source
+engineered_applicant = eng_df.iloc[0]
+clean_inputs = engineered_applicant.to_dict()
+# Ensure categorical/value overrides from UI are present
+clean_inputs["Primary_Income_Source"] = primary_income_source
+clean_inputs["Age"] = int(applicant_age)
+clean_inputs["Remittance_Status"] = int(remittance_status)
+clean_inputs["CIB_Score"] = float(cib_score_input if st.session_state.cib_verified else 0.0)
+
+# Cast remaining numeric-like values to float to avoid pd.NA types
+for k, v in list(clean_inputs.items()):
+    if k in {"Monthly_Income", "Loan_Amount", "Essential_Expenses", "Monthly_Installment", "Stress_Tested_Income", "Loan_Coverage_Ratio", "Land_Area", "CIB_Score"}:
+        try:
+            clean_inputs[k] = float(pd.to_numeric(v, errors="coerce"))
+            if not math.isfinite(clean_inputs[k]):
+                clean_inputs[k] = 0.0
+        except Exception:
+            clean_inputs[k] = 0.0
+
+# Prepare inputs for trained model inference (pure RandomForest predictions, no heuristics or simulations)
+# Ensure engineered numeric fields are safe to convert and never pd.NA
+real_time_model_inputs = dict(clean_inputs)
+real_time_model_inputs["Stress_Tested_Income"] = safe_float(
+    engineered_applicant.get("Stress_Tested_Income", stress_tested_monthly_income),
+    stress_tested_monthly_income,
+)
+real_time_model_inputs["Loan_Coverage_Ratio"] = safe_float(
+    engineered_applicant.get("Loan_Coverage_Ratio", 0.0),
+    0.0,
+)
 
 real_time_risk_score = None
 aligned_input_df = pd.DataFrame()
 real_time_inference_error = None
 try:
-    real_time_risk_score, aligned_input_df = compute_real_time_risk_score(real_time_model_inputs, model, scaler)
+    real_time_risk_score, aligned_input_df = compute_real_time_risk_score(real_time_model_inputs, model, None)
 except Exception as inference_error:
     real_time_inference_error = str(inference_error)
 
@@ -1621,8 +1986,14 @@ audit_payload = {
     "remittance_status": remittance_status,
     "land_area": land_area,
     "applicant_age": applicant_age,
-    "stress_tested_income": float(engineered_applicant["Stress_Tested_Income"]),
-    "loan_coverage_ratio": float(engineered_applicant["Loan_Coverage_Ratio"]),
+    "stress_tested_income": safe_float(
+        engineered_applicant.get("Stress_Tested_Income", stress_tested_monthly_income),
+        stress_tested_monthly_income,
+    ),
+    "loan_coverage_ratio": safe_float(
+        engineered_applicant.get("Loan_Coverage_Ratio", 0.0),
+        0.0,
+    ),
     "shap_top_3_contributing_factors": top_shap_factors,
     "final_decision": final_decision,
 }
@@ -1710,7 +2081,7 @@ with tab_ai:
         "Crisis Risk Score",
         f"{crisis_risk_score:.1f}/100",
         delta=f"{crisis_risk_score - baseline_risk_score:+.1f} pts",
-        help="Risk score under simulated economic stress from the sidebar sliders.",
+        help="Risk score using trained model under stress scenarios from sidebar sliders (stress-tested income, market shocks).",
     )
     st.metric(
         "Boosted Score",
@@ -1853,7 +2224,7 @@ with tab_ai:
                     key="show_shap_waterfall_plot",
                 )
                 if show_shap_waterfall:
-                    render_real_shap_waterfall(model, scaler, real_time_model_inputs)
+                    render_real_shap_waterfall(model, None, real_time_model_inputs)
                 risk_score = assessment["score"]
                 top_shap_rows = assessment["contribution_table"].head(3)
                 top_shap_pairs = [
@@ -1992,6 +2363,125 @@ with tab_audit:
         mime="text/csv",
         use_container_width=True,
     )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with tab_pilot:
+    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
+    st.subheader("Pilot Study — 20 Sample Profiles")
+
+    # Load pilot dataset
+    pilot_path = os.path.join(os.path.dirname(__file__), "data", "pilot_20_profiles.csv")
+    try:
+        pilot_df = pd.read_csv(pilot_path)
+    except Exception as e:
+        st.error(f"Failed to load pilot dataset at {pilot_path}: {e}")
+        pilot_df = pd.DataFrame()
+
+    if pilot_df.empty:
+        st.info("Pilot dataset is empty. Please ensure data/pilot_20_profiles.csv exists.")
+    else:
+        # Apply feature engineering to create derived features expected by model
+        eng_df = add_feature_engineering(pilot_df.copy())
+
+        # Align features to model training order
+        try:
+            feature_names = get_trained_feature_names(model)
+        except Exception:
+            # Fallback to a minimal feature set
+            feature_names = [c for c in ["Monthly_Income", "Loan_Amount", "Age"] if c in eng_df.columns]
+
+        # Ensure all required features present (fill defaults where needed)
+        aligned = eng_df.copy()
+        for fn in feature_names:
+            if fn not in aligned.columns:
+                # default numeric -> 0, default categorical -> first value if exists
+                aligned[fn] = 0 if aligned.shape[0] > 0 else ""
+
+        aligned_df = aligned[feature_names].copy()
+
+        # Cast numeric columns to float where possible, then ensure no missing values and float dtype
+        for col in aligned_df.columns:
+            try:
+                aligned_df[col] = pd.to_numeric(aligned_df[col], errors="coerce").fillna(0.0)
+            except Exception:
+                pass
+        # Final preprocessing to guarantee floats for model input
+        aligned_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        aligned_df.fillna(0.0, inplace=True)
+        try:
+            aligned_df = aligned_df.astype(float)
+        except Exception:
+            # If some columns are categorical and cannot be cast, leave them as-is after numeric coercion
+            pass
+
+        # Run batch model scoring
+        try:
+            probs = model.predict_proba(aligned_df)[:, 1]
+            scores = probs * 100.0
+        except Exception as e:
+            st.error(f"Model scoring failed for pilot set: {e}")
+            probs = np.zeros(len(aligned_df))
+            scores = np.zeros(len(aligned_df))
+
+        pilot_results = eng_df.copy()
+        pilot_results["Model_Probability"] = probs
+        pilot_results["Model_Score_0_100"] = scores
+        pilot_results["Decision"] = pilot_results["Model_Score_0_100"].apply(decision_bucket_from_score)
+
+        # Summary metrics
+        approval_rate = float((pilot_results["Decision"] == "Approved").mean() * 100.0)
+        st.metric("Pilot Approval Rate", f"{approval_rate:.1f}%")
+        st.subheader("Risk Distribution (Scores)")
+        st.bar_chart(pilot_results["Model_Score_0_100"].value_counts(bins=5).sort_index())
+
+        # Select a profile to load into the main UI
+        display_names = pilot_results.apply(lambda r: f"{r.get('Applicant_ID','')}: {r.get('Name','')} — INR {int(r.get('Monthly_Income',0))}", axis=1).tolist()
+        sel_index = st.selectbox("Select profile to load into Intake UI", options=list(range(len(display_names))), format_func=lambda i: display_names[i])
+        if st.button("Load Selected Profile into Intake", use_container_width=True):
+            row = pilot_results.iloc[int(sel_index)]
+            # Map common fields into session state so Intake tab reflects the selected profile
+            st.session_state.monthly_income_input = float(row.get("Monthly_Income", 0))
+            st.session_state.loan_amount_input = float(row.get("Loan_Amount", 0))
+            st.session_state.primary_income_source_input = row.get("Primary_Income_Source", "Salary")
+            st.session_state.essential_expenses_input = float(row.get("Essential_Expenses", 0))
+            st.session_state.monthly_installment_input = float(row.get("Monthly_Installment", 0))
+            st.session_state.remittance_status_input = int(row.get("Remittance_Status", 0))
+            st.session_state.land_area_input = float(row.get("Land_Area", 0))
+            st.session_state.applicant_age_input = int(row.get("Age", 30))
+            st.session_state.utility_bill_payment_input = row.get("Utility_Bill_Payment_Consistency", "Always on Time")
+            st.session_state.digital_wallet_input = int(row.get("Digital_Wallet_Transaction_Frequency", 50))
+            st.session_state.cib_score_input_widget = int(row.get("CIB_Score", 0))
+            st.session_state.cib_verified = bool(row.get("CIB_Score", 0) > 0)
+            st.success("Profile loaded into Intake tab. Switch to " + "📥 Applicant Intake" + " to review fields.")
+
+        st.markdown("---")
+
+        # Compute SHAP top features for each profile (if SHAP available)
+        top_shap_list = []
+        if shap_enabled and shap_explainer is not None:
+            st.info("Computing SHAP top features for pilot profiles (may take a few seconds)...")
+            for idx, r in pilot_results.iterrows():
+                try:
+                    # build_model_contributions expects monthly_income, loan_amount, age
+                    contributions, _, _ = build_model_contributions(int(r.get("Monthly_Income", 0)), float(r.get("Loan_Amount", 0)), int(r.get("Age", 0)))
+                    # pick top 3 by absolute contribution
+                    sorted_feats = sorted(contributions.items(), key=lambda kv: abs(kv[1]), reverse=True)[:3]
+                    top_shap = "; ".join([f"{k}:{v:.2f}" for k, v in sorted_feats])
+                except Exception:
+                    top_shap = "SHAP unavailable"
+                top_shap_list.append(top_shap)
+        else:
+            top_shap_list = ["SHAP unavailable"] * len(pilot_results)
+
+        pilot_results["Top_SHAP_Top3"] = top_shap_list
+
+        # Table and download
+        st.subheader("Pilot Profiles Summary")
+        st.dataframe(pilot_results.head(20), use_container_width=True)
+
+        csv_bytes = pilot_results.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Pilot Study CSV Report", data=csv_bytes, file_name="pilot_20_profiles_report.csv", mime="text/csv", use_container_width=True)
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 with st.container():

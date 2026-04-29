@@ -1,0 +1,21 @@
+Applicant_ID,Name,Monthly_Income,Loan_Amount,Age,Primary_Income_Source,Essential_Expenses,Monthly_Installment,Remittance_Status,Land_Area,CIB_Score,Utility_Bill_Payment_Consistency,Digital_Wallet_Transaction_Frequency
+PILOT001,Alex Mock,60000,300000,28,Salary,15000,15000,0,0.5,720,Always on Time,60
+PILOT002,Bina Demo,45000,200000,35,Business,12000,12000,0,1.0,680,Occasional Delay,40
+PILOT003,Chandra Test,30000,150000,42,Remittance,10000,8000,1,0.0,640,Frequent Delay,20
+PILOT004,Dipak Sample,120000,800000,50,Salary,30000,30000,0,2.0,790,Always on Time,85
+PILOT005,Elena AI,25000,100000,24,Other,8000,6000,0,0.0,610,Occasional Delay,30
+PILOT006,Fernando Demo,90000,400000,38,Business,20000,25000,0,3.0,760,Always on Time,70
+PILOT007,Gita Mock,70000,500000,31,Remittance,22000,20000,1,0.5,730,Always on Time,65
+PILOT008,Hemant Test,15000,80000,29,Agriculture,7000,4000,0,5.0,590,Frequent Delay,15
+PILOT009,Indira Demo,52000,250000,45,Salary,18000,16000,0,1.2,700,Always on Time,55
+PILOT010,Jamuna Sample,38000,180000,33,Business,14000,12000,0,0.8,660,Occasional Delay,45
+PILOT011,Kamal Test,8000,50000,22,Other,4000,3000,0,0.0,560,Frequent Delay,5
+PILOT012,Laxmi Demo,110000,600000,48,Salary,28000,32000,0,4.0,780,Always on Time,80
+PILOT013,Manoj Mock,47000,220000,36,Business,13000,11000,0,0.9,690,Occasional Delay,50
+PILOT014,Nisha Test,33000,160000,27,Remittance,9000,9000,1,0.3,650,Frequent Delay,35
+PILOT015,Omkar Demo,250000,1200000,55,Business,60000,90000,0,10.0,820,Always on Time,95
+PILOT016,Priti Sample,42000,210000,30,Salary,12500,13000,0,1.0,695,Always on Time,52
+PILOT017,Quinn Test,29000,140000,26,Agriculture,8500,7000,0,3.5,630,Frequent Delay,28
+PILOT018,Raj Demo,64000,320000,39,Remittance,20000,22000,1,0.7,725,Occasional Delay,62
+PILOT019,Sangeeta Mock,56000,260000,41,Salary,17000,15000,0,2.0,710,Always on Time,58
+PILOT020,Tara Sample,17000,90000,23,Other,6000,5000,0,0.0,600,Frequent Delay,12
