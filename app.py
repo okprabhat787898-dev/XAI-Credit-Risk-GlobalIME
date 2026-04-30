@@ -266,18 +266,9 @@ def build_user_input_dataframe(user_inputs: dict, model_obj, scaler_obj=None) ->
 
     ordered_df = pd.DataFrame([user_inputs], columns=feature_names)
 
-    # Coerce numeric-like columns to floats safely: convert strings/numeric values
-    # where possible, replace NA/NaN/inf with 0.0. Leave non-numeric (categorical)
-    # string columns untouched so encoded categorical features are preserved.
     for col in ordered_df.columns:
-        try:
-            conv = pd.to_numeric(ordered_df[col], errors="coerce")
-            # If conversion produced any non-NaN value, accept numeric conversion
-            if not conv.isna().all():
-                ordered_df[col] = conv.fillna(0.0)
-        except Exception:
-            # leave as-is on any unexpected error
-            continue
+    # Convert each column to numeric; replace any resulting NaN with 0.0
+     ordered_df[col] = pd.to_numeric(ordered_df[col], errors="coerce").fillna(0.0)
 
     return ordered_df
 
@@ -893,12 +884,92 @@ def simulate_remittance_shock_migration(
     shock_pct: float,
 ) -> dict[str, object]:
     """Simulate portfolio migration under remittance shock using vectorized model scoring."""
-    # Baseline scores using vectorized batch prediction
-    _, baseline_scores = get_risk_probability_and_score_batch(portfolio_df[["Monthly_Income", "Loan_Amount", "Age"]], model)
-    
-    stressed_portfolio = reduce_remittance_based_income(portfolio_df, shock_pct)
-    _, stressed_scores = get_risk_probability_and_score_batch(stressed_portfolio[["Monthly_Income", "Loan_Amount", "Age"]], model)
 
+    # ----- Prepare a base DataFrame with all columns needed for feature engineering -----
+    # This adds missing columns that exist in the training data but not in the simulation input.
+    base = portfolio_df.copy()
+
+    # Default values for columns required by add_feature_engineering
+    if "Essential_Expenses" not in base.columns:
+        base["Essential_Expenses"] = 0.0
+    if "Monthly_Installment" not in base.columns:
+        base["Monthly_Installment"] = 0.0
+    if "Primary_Income_Source" not in base.columns:
+        base["Primary_Income_Source"] = "Salary"  # or "Remittance" as per your simulation
+    if "Remittance_Status" not in base.columns:
+        base["Remittance_Status"] = 0  # default 0
+    if "CIB_Score" not in base.columns:
+        base["CIB_Score"] = 0.0
+    if "Land_Area" not in base.columns:
+        base["Land_Area"] = 0.0
+
+    # Work on a copy for baseline
+    baseline_df = base.copy()
+
+    # ----- Baseline feature engineering -----
+    eng_baseline = add_feature_engineering(baseline_df)
+    # Compute Loan_Coverage_Ratio exactly as in train_model.py
+    eng_baseline["Loan_Coverage_Ratio"] = (
+        (eng_baseline["Stress_Tested_Income"].astype(float) - eng_baseline["Essential_Expenses"].astype(float))
+        / eng_baseline["Monthly_Installment"].replace(0, pd.NA).fillna(1)  # avoid division by zero
+    )
+
+    features_baseline = (
+        eng_baseline[[
+            "Monthly_Income",
+            "Loan_Amount",
+            "Age",
+            "Stress_Tested_Income",
+            "Loan_Coverage_Ratio",
+            "Remittance_Status",
+            "CIB_Score",
+        ]]
+        .fillna(0.0)
+        .astype(float)
+    )
+
+    #   stressed portfolio
+    stressed_portfolio = reduce_remittance_based_income(portfolio_df, shock_pct)
+
+    # Build stressed DataFrame with same default columns
+    stressed_df = stressed_portfolio.copy()
+    for col in [
+        "Essential_Expenses",
+        "Monthly_Installment",
+        "Primary_Income_Source",
+        "Remittance_Status",
+        "CIB_Score",
+        "Land_Area",
+    ]:
+        if col not in stressed_df.columns:
+            stressed_df[col] = base[col].values  # reuse defaults
+
+    #   stressed feature engineering
+    eng_stressed = add_feature_engineering(stressed_df)
+    eng_stressed["Loan_Coverage_Ratio"] = (
+        (eng_stressed["Stress_Tested_Income"].astype(float) - eng_stressed["Essential_Expenses"].astype(float))
+        / eng_stressed["Monthly_Installment"].replace(0, pd.NA).fillna(1)
+    )
+
+    features_stressed = (
+        eng_stressed[[
+            "Monthly_Income",
+            "Loan_Amount",
+            "Age",
+            "Stress_Tested_Income",
+            "Loan_Coverage_Ratio",
+            "Remittance_Status",
+            "CIB_Score",
+        ]]
+        .fillna(0.0)
+        .astype(float)
+    )
+
+    #   Now score with the model
+    _, baseline_scores = get_risk_probability_and_score_batch(features_baseline, model)
+    _, stressed_scores = get_risk_probability_and_score_batch(features_stressed, model)
+
+    #   rest of the function remains unchanged …
     baseline_bucket = pd.Series(baseline_scores).apply(decision_bucket_from_score)
     stressed_bucket = pd.Series(stressed_scores).apply(decision_bucket_from_score)
 
